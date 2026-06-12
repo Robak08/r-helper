@@ -28,6 +28,7 @@ use utils::{execute_device_command_simple, DeviceStateReader};
 // Dynamic app metadata from Cargo
 const APP_NAME: &str = "R-Helper";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const AUTO_FAN_HYSTERESIS: u16 = 300;
 
 #[derive(Debug, Clone)]
 enum InitMessage {
@@ -86,6 +87,10 @@ struct RazerGuiApp {
     status_messages: bool,
 
     manual_fan_rpm: u16,
+    auto_fan_limit_enabled: bool,
+    auto_fan_max_rpm: u16,
+    auto_fan_cap_override: bool,
+    auto_fan_max_rpm_editing: bool,
     temp_brightness_step: usize,
     brightness_slider_active: bool,
     should_quit: bool,
@@ -127,6 +132,25 @@ impl RazerGuiApp {
             "Breathing" => Some(LogoMode::Breathing),
             "Off" => Some(LogoMode::Off),
             _ => None,
+        }
+    }
+
+    fn is_user_auto_mode(&self) -> bool {
+        self.status.fan_speed.eq_ignore_ascii_case("auto")
+    }
+
+    fn apply_device_fan_status(&mut self, fan_mode: FanMode, set_rpm: Option<u16>) {
+        if self.is_user_auto_mode() {
+            return;
+        }
+        let (fan_speed, fan_rpm) = match fan_mode {
+            FanMode::Auto => ("Auto".to_string(), None),
+            FanMode::Manual => ("Manual".to_string(), set_rpm),
+        };
+        self.status.fan_speed = fan_speed;
+        self.status.fan_rpm = fan_rpm;
+        if let Some(rpm) = fan_rpm {
+            self.manual_fan_rpm = rpm;
         }
     }
 
@@ -184,6 +208,10 @@ impl RazerGuiApp {
             status_messages: false,
 
             manual_fan_rpm: 2000,
+            auto_fan_limit_enabled: false,
+            auto_fan_max_rpm: 4500,
+            auto_fan_cap_override: false,
+            auto_fan_max_rpm_editing: false,
             temp_brightness_step: 0,
             brightness_slider_active: false,
 
@@ -436,31 +464,41 @@ fn get_fan_rpm_set(device: &Device, zone: librazer::types::FanZone) -> Option<u1
 
 impl RazerGuiApp {
     fn read_device_status(&mut self) -> Result<()> {
-        let device = self.device.as_ref().unwrap();
-        // Core perf + fan query (single device round-trip).
-        let (perf_mode, fan_mode) = command::get_perf_mode(device)?;
+        let (perf_mode, fan_mode, set_rpm, fan_actual_rpm, logo_mode, brightness, lights_always_on, battery_care) = {
+            let device = self.device.as_ref().unwrap();
+            let (perf_mode, fan_mode) = command::get_perf_mode(device)?;
+            let set_rpm = get_fan_rpm_set(device, librazer::types::FanZone::Zone1);
+            let fan_actual_rpm = get_fan_rpm_actual(device, librazer::types::FanZone::Zone1);
+            let logo_mode = command::get_logo_mode(device).ok();
+            let brightness = command::get_keyboard_brightness(device).ok();
+            let lights_always_on = command::get_lights_always_on(device).ok();
+            let battery_care = command::get_battery_care(device).ok();
+            (
+                perf_mode,
+                fan_mode,
+                set_rpm,
+                fan_actual_rpm,
+                logo_mode,
+                brightness,
+                lights_always_on,
+                battery_care,
+            )
+        };
+
         self.status.performance_mode = Self::perf_mode_to_string(perf_mode).to_string();
-        let (fan_speed, fan_rpm) = Self::get_fan_status_from_mode(fan_mode, device);
-        self.status.fan_speed = fan_speed;
-        self.status.fan_rpm = fan_rpm;
-        if let Some(rpm) = fan_rpm {
-            self.manual_fan_rpm = rpm;
-        }
-        self.status.fan_actual_rpm = get_fan_rpm_actual(device, librazer::types::FanZone::Zone1);
-        if let Ok(logo_mode) = command::get_logo_mode(device) {
+        self.apply_device_fan_status(fan_mode, set_rpm);
+        self.status.fan_actual_rpm = fan_actual_rpm;
+        if let Some(logo_mode) = logo_mode {
             self.status.logo_mode = Self::logo_mode_to_string(logo_mode).to_string();
         }
-
-        if let Ok(brightness) = command::get_keyboard_brightness(device) {
+        if let Some(brightness) = brightness {
             self.status.keyboard_brightness = brightness;
             self.temp_brightness_step = ui::lighting::raw_brightness_to_step_index(brightness);
         }
-
-        if let Ok(lights_always_on) = command::get_lights_always_on(device) {
+        if let Some(lights_always_on) = lights_always_on {
             self.status.lights_always_on = matches!(lights_always_on, LightsAlwaysOn::Enable);
         }
-
-        if let Ok(battery_care) = command::get_battery_care(device) {
+        if let Some(battery_care) = battery_care {
             self.status.battery_care = matches!(battery_care, BatteryCare::Enable);
         }
 
@@ -536,10 +574,12 @@ impl RazerGuiApp {
 
                     let (fan_speed, fan_rpm) =
                         Self::get_fan_status_from_mode(current_state.fan_mode, device);
-                    self.status.fan_speed = fan_speed;
-                    self.status.fan_rpm = fan_rpm;
-                    if let Some(rpm) = fan_rpm {
-                        self.manual_fan_rpm = rpm;
+                    if !self.is_user_auto_mode() {
+                        self.status.fan_speed = fan_speed;
+                        self.status.fan_rpm = fan_rpm;
+                        if let Some(rpm) = fan_rpm {
+                            self.manual_fan_rpm = rpm;
+                        }
                     }
 
                     self.status.logo_mode =
@@ -730,6 +770,12 @@ impl RazerGuiApp {
                 self.status.fan_speed = "Manual".into();
                 self.status.fan_rpm = Some(rpm);
                 self.manual_fan_rpm = rpm;
+            } else {
+                self.auto_fan_cap_override = false;
+                if self.is_user_auto_mode() {
+                    self.status.fan_speed = "Auto".into();
+                    self.status.fan_rpm = None;
+                }
             }
             self.set_optional_status_message("Mode changed".into());
             self.update_stored_device_state();
@@ -834,28 +880,35 @@ impl RazerGuiApp {
     fn set_fan_mode(&mut self, mode: &str, rpm: Option<u16>) {
         if let Some(ref device) = self.device {
             let result = match mode {
-                "auto" => match command::set_fan_mode(device, FanMode::Auto) {
-                    Ok(_) => {
-                        self.status.fan_speed = "Auto".to_string();
-                        self.status.fan_rpm = None;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                },
-                "manual" => match command::set_fan_mode(device, FanMode::Manual) {
-                    Ok(_) => {
-                        let rpm_val = rpm.unwrap_or(2000);
-                        match command::set_fan_rpm(device, rpm_val, true) {
-                            Ok(_) => {
-                                self.status.fan_speed = "Manual".to_string();
-                                self.status.fan_rpm = Some(rpm_val);
-                                Ok(())
-                            }
-                            Err(e) => Err(e),
+                "auto" => {
+                    self.auto_fan_cap_override = false;
+                    match command::set_fan_mode(device, FanMode::Auto) {
+                        Ok(_) => {
+                            self.status.fan_speed = "Auto".to_string();
+                            self.status.fan_rpm = None;
+                            Ok(())
                         }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
-                },
+                }
+                "manual" => {
+                    self.auto_fan_cap_override = false;
+                    self.auto_fan_max_rpm_editing = false;
+                    match command::set_fan_mode(device, FanMode::Manual) {
+                        Ok(_) => {
+                            let rpm_val = rpm.unwrap_or(2000);
+                            match command::set_fan_rpm(device, rpm_val, true) {
+                                Ok(_) => {
+                                    self.status.fan_speed = "Manual".to_string();
+                                    self.status.fan_rpm = Some(rpm_val);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
                 _ => return,
             };
 
@@ -890,6 +943,9 @@ impl RazerGuiApp {
     }
 
     fn enforce_manual_fan_rpm(&mut self) {
+        if self.auto_fan_cap_override {
+            return;
+        }
         if self.status.fan_speed == "Manual" {
             if let Some(ref device) = self.device {
                 // Periodically re-set manual RPM (device may drift after perf mode changes).
@@ -906,6 +962,56 @@ impl RazerGuiApp {
         }
     }
 
+    fn enforce_auto_fan_max_rpm(&mut self) {
+        if !self.auto_fan_limit_enabled
+            || !self.is_user_auto_mode()
+            || self.auto_fan_max_rpm_editing
+        {
+            return;
+        }
+
+        let Some(ref device) = self.device else {
+            return;
+        };
+        let Some(actual) = self.status.fan_actual_rpm else {
+            return;
+        };
+        let max = self.auto_fan_max_rpm;
+
+        if !self.auto_fan_cap_override {
+            if actual > max {
+                if command::set_fan_mode(device, FanMode::Manual).is_ok()
+                    && command::set_fan_rpm(device, max, true).is_ok()
+                {
+                    self.auto_fan_cap_override = true;
+                    self.status.fan_rpm = Some(max);
+                }
+            }
+        } else if actual < max.saturating_sub(AUTO_FAN_HYSTERESIS) {
+            if command::set_fan_mode(device, FanMode::Auto).is_ok() {
+                self.auto_fan_cap_override = false;
+                self.status.fan_rpm = None;
+            }
+        } else if command::set_fan_rpm(device, max, true).is_ok() {
+            self.status.fan_rpm = Some(max);
+        }
+    }
+
+    fn restore_auto_fan_mode(&mut self) {
+        self.auto_fan_cap_override = false;
+        if let Some(ref device) = self.device {
+            match command::set_fan_mode(device, FanMode::Auto) {
+                Ok(_) => {
+                    self.status.fan_rpm = None;
+                    self.set_optional_status_message("Auto fan mode restored".into());
+                }
+                Err(e) => {
+                    self.set_error_message(format!("Failed to restore auto fan mode: {}", e));
+                }
+            }
+        }
+    }
+
     fn render_fan_section(&mut self, ui: &mut egui::Ui) {
         use ui::fan::{render_fan_section, FanAction};
 
@@ -917,6 +1023,8 @@ impl RazerGuiApp {
             self.status.fan_actual_rpm,
             self.status.fan_rpm,
             &mut self.manual_fan_rpm,
+            self.auto_fan_limit_enabled,
+            &mut self.auto_fan_max_rpm,
             self.status_messages,
             self.status.performance_mode == "Custom",
             max_enabled,
@@ -955,6 +1063,24 @@ impl RazerGuiApp {
                 self.set_fan_rpm_only(rpm);
             }
             FanAction::SliderDragging(_) => {}
+            FanAction::ToggleAutoFanLimit(enabled) => {
+                self.auto_fan_limit_enabled = enabled;
+                self.auto_fan_max_rpm_editing = false;
+                if !enabled && self.auto_fan_cap_override {
+                    self.restore_auto_fan_mode();
+                }
+            }
+            FanAction::AutoMaxRpmDragging(rpm) => {
+                self.auto_fan_max_rpm = rpm;
+                self.auto_fan_max_rpm_editing = true;
+            }
+            FanAction::SetAutoFanMaxRpm(rpm) => {
+                self.auto_fan_max_rpm = rpm;
+                self.auto_fan_max_rpm_editing = false;
+                if self.auto_fan_cap_override {
+                    self.set_fan_rpm_only(rpm);
+                }
+            }
         }
     }
 
@@ -1119,10 +1245,12 @@ impl eframe::App for RazerGuiApp {
                         let new_mode = Self::perf_mode_to_string(perf_mode).to_string();
                         if self.status.performance_mode != new_mode {
                             self.status.performance_mode = new_mode;
-                            let (fan_speed, fan_rpm) =
-                                Self::get_fan_status_from_mode(fan_mode, device);
-                            self.status.fan_speed = fan_speed;
-                            self.status.fan_rpm = fan_rpm;
+                            if !self.is_user_auto_mode() {
+                                let (fan_speed, fan_rpm) =
+                                    Self::get_fan_status_from_mode(fan_mode, device);
+                                self.status.fan_speed = fan_speed;
+                                self.status.fan_rpm = fan_rpm;
+                            }
                         }
                     }
                 }
@@ -1161,11 +1289,13 @@ impl eframe::App for RazerGuiApp {
                             self.status.fan_actual_rpm =
                                 get_fan_rpm_actual(device, librazer::types::FanZone::Zone1);
 
-                            let (current_fan_mode, _) = Self::read_current_fan_state(device);
-                            let (fan_speed, _) =
-                                Self::get_fan_status_from_mode(current_fan_mode, device);
-                            self.status.fan_speed = fan_speed;
+                            let (current_fan_mode, set_rpm) = Self::read_current_fan_state(device);
+                            if self.status.fan_speed.eq_ignore_ascii_case("manual") {
+                                self.apply_device_fan_status(current_fan_mode, set_rpm);
+                            }
                         }
+
+                        self.enforce_auto_fan_max_rpm();
 
                         if self.last_fan_enforce_time.elapsed().as_secs_f32() >= 1.0 {
                             self.enforce_manual_fan_rpm();

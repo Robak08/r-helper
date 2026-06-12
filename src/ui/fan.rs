@@ -15,6 +15,9 @@ pub enum FanAction {
     SetManualMode(u16),
     SetManualRpm(u16),
     SliderDragging(u16),
+    ToggleAutoFanLimit(bool),
+    AutoMaxRpmDragging(u16),
+    SetAutoFanMaxRpm(u16),
 }
 
 pub fn render_fan_section(
@@ -23,6 +26,8 @@ pub fn render_fan_section(
     fan_actual_rpm: Option<u16>,
     fan_set_rpm: Option<u16>,
     manual_fan_rpm: &mut u16,
+    auto_fan_limit_enabled: bool,
+    auto_fan_max_rpm: &mut u16,
     show_status_messages: bool,
     custom_mode_active: bool,
     max_fan_speed_enabled: bool,
@@ -31,7 +36,14 @@ pub fn render_fan_section(
     let mut toggle_max = max_fan_speed_enabled;
 
     ui.group(|ui| {
-        render_fan_header(ui, fan_actual_rpm, fan_set_rpm, show_status_messages);
+        render_fan_header(
+            ui,
+            fan_actual_rpm,
+            fan_set_rpm,
+            auto_fan_limit_enabled,
+            *auto_fan_max_rpm,
+            show_status_messages,
+        );
         ui.separator();
         // Fan Mode Selection row with Max on the right
         let available_width = ui.available_width();
@@ -68,6 +80,14 @@ pub fn render_fan_section(
             },
         );
 
+        if fan_speed.eq_ignore_ascii_case("auto") {
+            if let Some(auto_action) =
+                render_auto_fan_limit_controls(ui, auto_fan_limit_enabled, auto_fan_max_rpm)
+            {
+                action = auto_action;
+            }
+        }
+
         // Manual RPM Slider (shown only in manual mode)
         if fan_speed.eq_ignore_ascii_case("manual") {
             if let Some(manual_action) = render_manual_fan_controls(ui, manual_fan_rpm) {
@@ -75,7 +95,7 @@ pub fn render_fan_section(
             }
         }
 
-        render_current_status(ui, fan_speed);
+        render_current_status(ui, fan_speed, auto_fan_limit_enabled, *auto_fan_max_rpm);
     });
 
     (action, toggle_max)
@@ -85,6 +105,8 @@ fn render_fan_header(
     ui: &mut egui::Ui,
     fan_actual_rpm: Option<u16>,
     fan_set_rpm: Option<u16>,
+    auto_fan_limit_enabled: bool,
+    auto_fan_max_rpm: u16,
     show_status_messages: bool,
 ) {
     ui.horizontal(|ui| {
@@ -109,6 +131,14 @@ fn render_fan_header(
                         )
                         .selectable(false),
                     );
+                } else if auto_fan_limit_enabled {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("Set: Auto max {} |", auto_fan_max_rpm))
+                                .color(Color32::LIGHT_GRAY),
+                        )
+                        .selectable(false),
+                    );
                 } else {
                     ui.add(
                         egui::Label::new(RichText::new("Set: Auto |").color(Color32::LIGHT_GRAY))
@@ -120,7 +150,47 @@ fn render_fan_header(
     });
 }
 
-// (Removed old separate render_fan_mode_controls; integrated directly for alignment needs)
+fn render_auto_fan_limit_controls(
+    ui: &mut egui::Ui,
+    auto_fan_limit_enabled: bool,
+    auto_fan_max_rpm: &mut u16,
+) -> Option<FanAction> {
+    let mut limit_enabled = auto_fan_limit_enabled;
+    let mut action = None;
+
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut limit_enabled, "Limit max RPM")
+            .changed()
+        {
+            action = Some(FanAction::ToggleAutoFanLimit(limit_enabled));
+        }
+
+        ui.add_enabled_ui(limit_enabled, |ui| {
+            let slider_width = ui.available_width().max(ui.spacing().interact_size.y * 8.0);
+            let response = ui.add_sized(
+                [slider_width, ui.spacing().interact_size.y],
+                egui::Slider::new(auto_fan_max_rpm, MIN_MANUAL_RPM..=MAX_MANUAL_RPM)
+                    .step_by(RPM_STEP),
+            );
+            if response.dragged() || response.has_focus() {
+                clamp_rpm(auto_fan_max_rpm);
+                action = Some(FanAction::AutoMaxRpmDragging(*auto_fan_max_rpm));
+            } else if response.drag_stopped() || response.lost_focus() {
+                clamp_rpm(auto_fan_max_rpm);
+                action = Some(FanAction::SetAutoFanMaxRpm(*auto_fan_max_rpm));
+            }
+        });
+    });
+
+    action
+}
+
+fn clamp_rpm(rpm: &mut u16) {
+    *rpm = (*rpm).clamp(MIN_MANUAL_RPM, MAX_MANUAL_RPM);
+    *rpm = (*rpm / RPM_STEP as u16) * RPM_STEP as u16;
+    *rpm = (*rpm).clamp(MIN_MANUAL_RPM, MAX_MANUAL_RPM);
+}
 
 fn render_manual_fan_controls(ui: &mut egui::Ui, manual_fan_rpm: &mut u16) -> Option<FanAction> {
     ui.horizontal(|ui| {
@@ -140,8 +210,18 @@ fn render_manual_fan_controls(ui: &mut egui::Ui, manual_fan_rpm: &mut u16) -> Op
     .inner
 }
 
-fn render_current_status(ui: &mut egui::Ui, fan_speed: &str) {
-    ui.add(egui::Label::new(format!("Current: {}", fan_speed)).selectable(false));
+fn render_current_status(
+    ui: &mut egui::Ui,
+    fan_speed: &str,
+    auto_fan_limit_enabled: bool,
+    auto_fan_max_rpm: u16,
+) {
+    let status = if fan_speed.eq_ignore_ascii_case("auto") && auto_fan_limit_enabled {
+        format!("Auto (max {} RPM)", auto_fan_max_rpm)
+    } else {
+        fan_speed.to_string()
+    };
+    ui.add(egui::Label::new(format!("Current: {}", status)).selectable(false));
 }
 
 fn calculate_rpm_color(actual_rpm: u16) -> Color32 {
