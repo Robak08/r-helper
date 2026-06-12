@@ -1,9 +1,12 @@
 #![windows_subsystem = "windows"]
 
+mod config;
 mod device;
 mod messaging;
 mod power;
+mod startup;
 mod system;
+mod tray;
 mod ui;
 mod utils;
 
@@ -11,7 +14,7 @@ use eframe::egui;
 use egui::IconData;
 
 use anyhow::Result;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use librazer::types::{
     BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode,
@@ -47,7 +50,7 @@ struct DeviceStatus {
     logo_mode: String,
     keyboard_brightness: u8,
     lights_always_on: bool,
-    battery_care: bool,
+    battery_care: BatteryCare,
 }
 
 impl Default for DeviceStatus {
@@ -60,7 +63,7 @@ impl Default for DeviceStatus {
             logo_mode: "Reading...".to_string(),
             keyboard_brightness: 0,
             lights_always_on: false,
-            battery_care: true,
+            battery_care: BatteryCare::Percent80,
         }
     }
 }
@@ -76,6 +79,7 @@ struct RazerGuiApp {
     ac_power: bool,
     ac_profile: CompleteDeviceState,
     battery_profile: CompleteDeviceState,
+    auto_switch_enabled: bool,
 
     loading: bool,
     fully_initialized: bool,
@@ -94,6 +98,11 @@ struct RazerGuiApp {
     temp_brightness_step: usize,
     brightness_slider_active: bool,
     should_quit: bool,
+    tray_state: Option<Arc<tray::TraySharedState>>,
+    #[allow(dead_code)]
+    _tray_guard: Option<tray::TrayHandle>,
+    minimize_to_tray: bool,
+    run_at_startup: bool,
 
     init_power_read: bool,
     init_specs_complete: bool,
@@ -180,10 +189,12 @@ impl RazerGuiApp {
     }
 
     fn new() -> Self {
-        // Profiles kept in-memory so we can auto-switch on AC/Battery changes.
-        let ac_profile = CompleteDeviceState::default();
-        let battery_profile =
-            CompleteDeviceState { perf_mode: PerfMode::Battery, ..CompleteDeviceState::default() };
+        let app_config = config::AppConfig::load();
+        let ac_profile = app_config.ac_profile;
+        let battery_profile = app_config.battery_profile;
+        let auto_switch_enabled = app_config.auto_switch_enabled;
+        let auto_fan_limit_enabled = app_config.auto_fan_limit_enabled;
+        let auto_fan_max_rpm = app_config.auto_fan_max_rpm;
 
         let (init_sender, init_receiver) = mpsc::channel();
 
@@ -198,6 +209,7 @@ impl RazerGuiApp {
             ac_power: true,
             ac_profile,
             battery_profile,
+            auto_switch_enabled,
             loading: true,
             fully_initialized: false,
             init_receiver: Some(init_receiver),
@@ -208,14 +220,18 @@ impl RazerGuiApp {
             status_messages: false,
 
             manual_fan_rpm: 2000,
-            auto_fan_limit_enabled: false,
-            auto_fan_max_rpm: 4500,
+            auto_fan_limit_enabled,
+            auto_fan_max_rpm,
             auto_fan_cap_override: false,
             auto_fan_max_rpm_editing: false,
             temp_brightness_step: 0,
             brightness_slider_active: false,
 
             should_quit: false,
+            tray_state: None,
+            _tray_guard: None,
+            minimize_to_tray: true,
+            run_at_startup: startup::is_startup_enabled(),
 
             init_power_read: false,
             init_specs_complete: false,
@@ -350,7 +366,7 @@ impl RazerGuiApp {
             if let Some(battery_care) =
                 reader.read(|d| command::get_battery_care(d), "battery care")
             {
-                self.status.battery_care = matches!(battery_care, BatteryCare::Enable);
+                self.status.battery_care = battery_care;
             }
 
             let errors = reader.finish();
@@ -505,7 +521,7 @@ impl RazerGuiApp {
             self.status.lights_always_on = matches!(lights_always_on, LightsAlwaysOn::Enable);
         }
         if let Some(battery_care) = battery_care {
-            self.status.battery_care = matches!(battery_care, BatteryCare::Enable);
+            self.status.battery_care = battery_care;
         }
 
         Ok(())
@@ -532,7 +548,7 @@ impl RazerGuiApp {
                 self.status.lights_always_on = matches!(lights_always_on, LightsAlwaysOn::Enable);
             }
             if let Ok(battery_care) = command::get_battery_care(device) {
-                self.status.battery_care = matches!(battery_care, BatteryCare::Enable);
+                self.status.battery_care = battery_care;
             }
         }
     }
@@ -544,7 +560,7 @@ impl RazerGuiApp {
                 self.status.lights_always_on = matches!(lights_always_on, LightsAlwaysOn::Enable);
             }
             if let Ok(battery_care) = command::get_battery_care(device) {
-                self.status.battery_care = matches!(battery_care, BatteryCare::Enable);
+                self.status.battery_care = battery_care;
             }
         }
     }
@@ -598,8 +614,7 @@ impl RazerGuiApp {
 
                     self.status.lights_always_on =
                         matches!(current_state.lights_always_on, LightsAlwaysOn::Enable);
-                    self.status.battery_care =
-                        matches!(current_state.battery_care, BatteryCare::Enable);
+                    self.status.battery_care = current_state.battery_care;
 
                     if old_perf_mode != new_perf_mode {
                         self.set_optional_status_message("Mode updated".to_string());
@@ -639,66 +654,143 @@ impl RazerGuiApp {
     }
 
     fn auto_switch_profile(&mut self) {
-        if let Some(ref device) = self.device {
-            // Choose which saved profile to apply based on current AC state.
-            let target_profile =
-                if self.ac_power { self.ac_profile.clone() } else { self.battery_profile.clone() };
-
-            let profile_name = if self.ac_power { "AC" } else { "Battery" };
-
-            if let Err(e) = command::set_perf_mode(device, target_profile.perf_mode) {
-                self.set_error_message(format!(
-                    "Failed to switch to {} profile: {}",
-                    profile_name, e
-                ));
-                return;
-            }
-
-            self.status.performance_mode =
-                Self::perf_mode_to_string(target_profile.perf_mode).to_string();
-
-            self.set_status_message(format!("⚡ Auto-switched to {} profile", profile_name));
+        if !self.auto_switch_enabled {
+            return;
         }
 
-        // Read current device state to preserve user settings
-        if let Err(_) = self.read_device_status() {
-            // If we can't read device status, try to apply minimal fallback
-            if let Some(ref device) = self.device {
-                let target_profile = if self.ac_power {
-                    self.ac_profile.clone()
-                } else {
-                    self.battery_profile.clone()
-                };
+        let Some(ref device) = self.device else {
+            return;
+        };
 
-                if let Err(e) = self.apply_profile(device, &target_profile) {
-                    self.set_error_message(format!("Failed to apply fallback profile: {}", e));
-                }
-            }
+        let target_profile =
+            if self.ac_power { self.ac_profile.clone() } else { self.battery_profile.clone() };
+        let profile_name = if self.ac_power { "AC" } else { "Battery" };
+
+        if let Err(e) = target_profile.apply_to_device(device) {
+            self.set_error_message(format!(
+                "Failed to switch to {} profile: {}",
+                profile_name, e
+            ));
+            return;
         }
 
+        self.sync_ui_after_profile_apply(&target_profile);
         self.update_stored_device_state();
-
-        self.sync_ui_with_device_state();
+        self.set_status_message(format!("Auto-switched to {} settings", profile_name));
     }
 
-    fn apply_profile(&self, device: &Device, profile: &CompleteDeviceState) -> Result<()> {
-        command::set_perf_mode(device, profile.perf_mode)?;
+    fn sync_ui_after_profile_apply(&mut self, profile: &CompleteDeviceState) {
+        self.status.performance_mode = Self::perf_mode_to_string(profile.perf_mode).to_string();
 
-        command::set_logo_mode(device, profile.logo_mode)?;
+        let (fan_speed, fan_rpm) = match profile.fan_mode {
+            FanMode::Auto => ("Auto".to_string(), None),
+            FanMode::Manual => ("Manual".to_string(), profile.fan_rpm),
+        };
+        self.status.fan_speed = fan_speed;
+        self.status.fan_rpm = fan_rpm;
+        if let Some(rpm) = profile.fan_rpm {
+            self.manual_fan_rpm = rpm;
+        }
+        self.auto_fan_cap_override = false;
 
-        if let Ok(current_brightness) = command::get_keyboard_brightness(device) {
-            if current_brightness != profile.keyboard_brightness {
-                command::set_keyboard_brightness(device, profile.keyboard_brightness)?;
-            }
-        } else {
-            command::set_keyboard_brightness(device, profile.keyboard_brightness)?;
+        self.status.logo_mode = Self::logo_mode_to_string(profile.logo_mode).to_string();
+        self.status.keyboard_brightness = profile.keyboard_brightness;
+        self.temp_brightness_step =
+            ui::lighting::raw_brightness_to_step_index(profile.keyboard_brightness);
+        self.status.lights_always_on =
+            matches!(profile.lights_always_on, LightsAlwaysOn::Enable);
+        self.status.battery_care = profile.battery_care;
+
+        if let Some(cpu) = profile.cpu_boost {
+            self.cpu_boost = cpu;
+        }
+        if let Some(gpu) = profile.gpu_boost {
+            self.gpu_boost = gpu;
         }
 
-        command::set_lights_always_on(device, profile.lights_always_on)?;
+        if let Some(ref device) = self.device {
+            self.status.fan_actual_rpm =
+                get_fan_rpm_actual(device, librazer::types::FanZone::Zone1);
+        }
+    }
 
-        command::set_battery_care(device, profile.battery_care)?;
+    fn persist_config(&self) -> Result<()> {
+        let config = config::AppConfig {
+            version: 1,
+            auto_switch_enabled: self.auto_switch_enabled,
+            ac_profile: self.ac_profile.clone(),
+            battery_profile: self.battery_profile.clone(),
+            auto_fan_limit_enabled: self.auto_fan_limit_enabled,
+            auto_fan_max_rpm: self.auto_fan_max_rpm,
+        };
+        config.save()
+    }
 
-        Ok(())
+    fn save_current_as_ac_profile(&mut self) {
+        let Some(ref device) = self.device else {
+            self.set_no_device_message();
+            return;
+        };
+
+        match CompleteDeviceState::read_from_device(device) {
+            Ok(profile) => {
+                self.ac_profile = profile;
+                match self.persist_config() {
+                    Ok(_) => self.set_status_message("AC settings saved".into()),
+                    Err(e) => self.set_error_message(format!("Failed to save config: {}", e)),
+                }
+            }
+            Err(e) => self.set_error_message(format!("Failed to read device state: {}", e)),
+        }
+    }
+
+    fn save_current_as_battery_profile(&mut self) {
+        let Some(ref device) = self.device else {
+            self.set_no_device_message();
+            return;
+        };
+
+        match CompleteDeviceState::read_from_device(device) {
+            Ok(profile) => {
+                self.battery_profile = profile;
+                match self.persist_config() {
+                    Ok(_) => self.set_status_message("Battery settings saved".into()),
+                    Err(e) => self.set_error_message(format!("Failed to save config: {}", e)),
+                }
+            }
+            Err(e) => self.set_error_message(format!("Failed to read device state: {}", e)),
+        }
+    }
+
+    fn render_profiles_section(&mut self, ui: &mut egui::Ui) {
+        use ui::profiles::{render_profiles_section, ProfileAction};
+
+        let action = render_profiles_section(
+            ui,
+            self.auto_switch_enabled,
+            self.ac_profile.perf_mode,
+            self.battery_profile.perf_mode,
+            self.device.is_none(),
+        );
+
+        match action {
+            ProfileAction::None => {}
+            ProfileAction::ToggleAutoSwitch(enabled) => {
+                self.auto_switch_enabled = enabled;
+                if let Err(e) = self.persist_config() {
+                    self.set_error_message(format!("Failed to save config: {}", e));
+                    self.auto_switch_enabled = !enabled;
+                } else {
+                    self.set_optional_status_message(if enabled {
+                        "Auto-switch enabled".into()
+                    } else {
+                        "Auto-switch disabled".into()
+                    });
+                }
+            }
+            ProfileAction::SaveAcProfile => self.save_current_as_ac_profile(),
+            ProfileAction::SaveBatteryProfile => self.save_current_as_battery_profile(),
+        }
     }
 
     fn set_performance_mode(&mut self, mode: &str) {
@@ -1075,6 +1167,9 @@ impl RazerGuiApp {
                 if !enabled && self.auto_fan_cap_override {
                     self.restore_auto_fan_mode();
                 }
+                if let Err(e) = self.persist_config() {
+                    self.set_error_message(format!("Failed to save config: {}", e));
+                }
             }
             FanAction::AutoMaxRpmDragging(rpm) => {
                 self.auto_fan_max_rpm = rpm;
@@ -1085,6 +1180,9 @@ impl RazerGuiApp {
                 self.auto_fan_max_rpm_editing = false;
                 if self.auto_fan_cap_override {
                     self.set_fan_rpm_only(rpm);
+                }
+                if let Err(e) = self.persist_config() {
+                    self.set_error_message(format!("Failed to save config: {}", e));
                 }
             }
         }
@@ -1186,26 +1284,27 @@ impl RazerGuiApp {
         }
     }
 
-    fn toggle_battery_care(&mut self) {
-        let battery_care =
-            if self.status.battery_care { BatteryCare::Enable } else { BatteryCare::Disable };
+    fn set_battery_care(&mut self, level: BatteryCare) {
+        let previous = self.status.battery_care;
+        self.status.battery_care = level;
 
         if let Some(ref device) = self.device {
-            match command::set_battery_care(device, battery_care) {
+            match command::set_battery_care(device, level) {
                 Ok(_) => {
                     self.set_optional_status_message(format!(
-                        "Battery care {}",
-                        if self.status.battery_care { "enabled" } else { "disabled" }
+                        "Battery care set to {}",
+                        level.label()
                     ));
+                    self.update_stored_device_state();
                 }
                 Err(e) => {
                     self.set_status_message(format!("Failed to set battery care: {}", e));
-                    // Revert the UI change on error
-                    self.status.battery_care = !self.status.battery_care;
+                    self.status.battery_care = previous;
                 }
             }
         } else {
             self.set_no_device_message();
+            self.status.battery_care = previous;
         }
     }
 
@@ -1216,8 +1315,54 @@ impl RazerGuiApp {
 
         match action {
             BatteryAction::None => {}
-            BatteryAction::ToggleBatteryCare => {
-                self.toggle_battery_care();
+            BatteryAction::SetBatteryCare(level) => {
+                self.set_battery_care(level);
+            }
+        }
+    }
+
+    fn is_window_visible(&self) -> bool {
+        self.tray_state
+            .as_ref()
+            .map(|s| s.is_visible())
+            .unwrap_or(true)
+    }
+
+    fn hide_to_tray(&mut self) {
+        if let Some(state) = self.tray_state.clone() {
+            state.hide();
+            self.set_optional_status_message("Running in system tray".into());
+        }
+    }
+
+    fn poll_while_hidden(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        self.process_background_initialization();
+
+        if self.fully_initialized && self.device.is_some() {
+            const HIDDEN_POLL_INTERVAL: f32 = 2.5;
+            if self.last_perf_poll_time.elapsed().as_secs_f32() >= HIDDEN_POLL_INTERVAL {
+                if let Ok(current_ac_power) = get_power_state() {
+                    if current_ac_power != self.ac_power {
+                        self.ac_power = current_ac_power;
+                        self.auto_switch_profile();
+                    }
+                }
+                if let Some(ref device) = self.device {
+                    if let Ok((perf_mode, fan_mode)) = command::get_perf_mode(device) {
+                        let new_mode = Self::perf_mode_to_string(perf_mode).to_string();
+                        if self.status.performance_mode != new_mode {
+                            self.status.performance_mode = new_mode;
+                            if !self.is_user_auto_mode() {
+                                let (fan_speed, fan_rpm) =
+                                    Self::get_fan_status_from_mode(fan_mode, device);
+                                self.status.fan_speed = fan_speed;
+                                self.status.fan_rpm = fan_rpm;
+                            }
+                        }
+                    }
+                }
+                self.last_perf_poll_time = std::time::Instant::now();
             }
         }
     }
@@ -1225,6 +1370,14 @@ impl RazerGuiApp {
 
 impl eframe::App for RazerGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.is_window_visible() {
+            self.poll_while_hidden(ctx);
+            if self.should_quit {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         self.process_background_initialization();
@@ -1264,9 +1417,13 @@ impl eframe::App for RazerGuiApp {
             }
         }
 
-        // Handle close request from X button
         if ctx.input(|i| i.viewport().close_requested()) {
-            self.should_quit = true;
+            if self.minimize_to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.hide_to_tray();
+            } else {
+                self.should_quit = true;
+            }
         }
 
         // Handle quit
@@ -1340,13 +1497,32 @@ impl eframe::App for RazerGuiApp {
             }
         }
         // (clear_status_message_if_disabled removed)
+        let prev_startup = self.run_at_startup;
         let footer_height = egui::TopBottomPanel::bottom("footer")
             .show(ctx, |ui| {
-                ui::footer::render_footer(ui, &mut self.status_messages);
+                ui::footer::render_footer(
+                    ui,
+                    &mut self.status_messages,
+                    &mut self.minimize_to_tray,
+                    &mut self.run_at_startup,
+                );
             })
             .response
             .rect
             .height();
+
+        if self.run_at_startup != prev_startup {
+            if let Err(e) = startup::set_startup_enabled(self.run_at_startup) {
+                self.set_error_message(format!("Failed to update startup setting: {}", e));
+                self.run_at_startup = prev_startup;
+            } else {
+                self.set_optional_status_message(if self.run_at_startup {
+                    "Run at startup enabled".into()
+                } else {
+                    "Run at startup disabled".into()
+                });
+            }
+        }
 
         let central_response = egui::CentralPanel::default().show(ctx, |ui| {
             // Header with device name and status messages
@@ -1371,6 +1547,9 @@ impl eframe::App for RazerGuiApp {
             ui.separator();
 
             self.render_battery_section(ui);
+            ui.separator();
+
+            self.render_profiles_section(ui);
         });
         // Discrete height adjustment only when custom/debug controls appear or disappear
         let custom_visible_now = self.device.is_some() && self.status.performance_mode == "Custom";
@@ -1441,7 +1620,9 @@ fn set_windows_app_id() {}
 
 fn main() -> Result<(), eframe::Error> {
     set_windows_app_id();
-    let initial_height = 500.0;
+    let initial_height = 580.0;
+    let egui_icon = load_icon();
+    let tray_icon = tray::icon_from_egui(egui_icon.clone());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([450.0, initial_height])
@@ -1449,7 +1630,7 @@ fn main() -> Result<(), eframe::Error> {
             .with_maximize_button(false)
             .with_fullscreen(false)
             .with_title(APP_NAME)
-            .with_icon(load_icon())
+            .with_icon(egui_icon)
             .with_always_on_top()
             .with_active(true),
         ..Default::default()
@@ -1467,7 +1648,14 @@ fn main() -> Result<(), eframe::Error> {
                 ));
             });
 
+            let tray_state = tray::TraySharedState::new(cc.egui_ctx.clone());
+            if let Some(hwnd) = tray::hwnd_from_window_handle(cc) {
+                tray_state.set_hwnd(hwnd);
+            }
+            let tray_guard = tray::TrayHandle::init(tray_icon, Arc::clone(&tray_state));
             let mut app = RazerGuiApp::new();
+            app.tray_state = Some(tray_state);
+            app._tray_guard = Some(tray_guard);
             app.base_window_height = initial_height as f32;
             Ok(Box::new(app))
         }),

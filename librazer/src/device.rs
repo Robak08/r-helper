@@ -1,7 +1,7 @@
 use crate::capabilities::{probe_features, resolve_descriptor, run_init_cmds};
 use crate::descriptor::Descriptor;
 use crate::packet::Packet;
-use crate::profile::{infer_generation_from_sku, lookup_profile};
+use crate::profile::{lookup_profile, resolve_generation};
 
 use anyhow::{anyhow, Context, Result};
 use std::{thread, time};
@@ -149,9 +149,7 @@ impl Device {
         let target_pid = Self::pick_target_pid(&pid_list);
         let mut device = Self::open_by_pid(target_pid)?;
 
-        let generation = lookup_profile(target_pid)
-            .map(|p| p.generation)
-            .unwrap_or_else(|| infer_generation_from_sku(&model_sku));
+        let generation = resolve_generation(target_pid, &model_sku);
 
         let probed = probe_features(&device);
         let descriptor = resolve_descriptor(model_sku, display_name, target_pid, generation, probed);

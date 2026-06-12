@@ -84,10 +84,9 @@ pub const KNOWN_PROFILES: &[PidProfile] = &[
     PidProfile { pid: 0x028c, generation: BladeGeneration::Legacy4 }, // Blade 14 (2022)
     PidProfile { pid: 0x028b, generation: BladeGeneration::Legacy4 }, // Blade 17 (2022)
     PidProfile { pid: 0x029c, generation: BladeGeneration::Legacy4 }, // Blade 15 (2023)
-    // Discovery
-    PidProfile { pid: 0x028a, generation: BladeGeneration::Discovery }, // Blade 15 (2022)
-    PidProfile { pid: 0x029d, generation: BladeGeneration::Discovery }, // Blade 14 (2023)
-    PidProfile { pid: 0x029f, generation: BladeGeneration::Discovery }, // Blade 16 (2023)
+    PidProfile { pid: 0x028a, generation: BladeGeneration::Legacy4 }, // Blade 15 (2022)
+    PidProfile { pid: 0x029d, generation: BladeGeneration::Legacy4 }, // Blade 14 (2023)
+    PidProfile { pid: 0x029f, generation: BladeGeneration::Legacy4 }, // Blade 16 (2023)
     // Modern6
     PidProfile { pid: 0x02c5, generation: BladeGeneration::Modern6 }, // Blade 14 (2025)
     PidProfile { pid: 0x02c6, generation: BladeGeneration::Modern6 }, // Blade 16 (2025)
@@ -100,6 +99,23 @@ pub const GENERIC_FALLBACK: PidProfile = PidProfile {
 
 pub fn lookup_profile(pid: u16) -> Option<&'static PidProfile> {
     KNOWN_PROFILES.iter().find(|p| p.pid == pid)
+}
+
+pub fn lookup_profile_or_fallback(pid: u16) -> &'static PidProfile {
+    lookup_profile(pid).unwrap_or(&GENERIC_FALLBACK)
+}
+
+/// Resolve firmware generation from PID table, then SystemSKU, then generic fallback.
+pub fn resolve_generation(pid: u16, model_sku: &str) -> BladeGeneration {
+    if let Some(profile) = lookup_profile(pid) {
+        return profile.generation;
+    }
+    let from_sku = infer_generation_from_sku(model_sku);
+    if from_sku != BladeGeneration::Discovery {
+        from_sku
+    } else {
+        GENERIC_FALLBACK.generation
+    }
 }
 
 /// Infer generation from SystemSKU when PID is unknown (first 10 chars per Razer support doc).
@@ -143,5 +159,33 @@ mod tests {
     #[test]
     fn lookup_unknown_pid() {
         assert!(lookup_profile(0xffff).is_none());
+    }
+
+    #[test]
+    fn formerly_discovery_pids_are_legacy4() {
+        for pid in [0x028a, 0x029d, 0x029f] {
+            assert_eq!(lookup_profile(pid).unwrap().generation, BladeGeneration::Legacy4);
+        }
+    }
+
+    #[test]
+    fn lookup_profile_or_fallback_known_and_unknown() {
+        assert_eq!(lookup_profile_or_fallback(0x02c6).pid, 0x02c6);
+        assert_eq!(lookup_profile_or_fallback(0xffff).pid, GENERIC_FALLBACK.pid);
+    }
+
+    #[test]
+    fn resolve_generation_prefers_pid_over_sku() {
+        assert_eq!(resolve_generation(0x0279, "RZ09-0528"), BladeGeneration::Legacy4);
+    }
+
+    #[test]
+    fn resolve_generation_uses_sku_when_pid_unknown() {
+        assert_eq!(resolve_generation(0xffff, "RZ09-0528"), BladeGeneration::Modern6);
+    }
+
+    #[test]
+    fn resolve_generation_falls_back_to_discovery() {
+        assert_eq!(resolve_generation(0xffff, "RZ09-09999"), BladeGeneration::Discovery);
     }
 }

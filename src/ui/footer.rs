@@ -4,16 +4,21 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 use std::process::Command;
 
 /// Renders the application footer with version info and controls
-pub fn render_footer(ui: &mut egui::Ui, status_messages: &mut bool) {
-    // Add vertical padding for better spacing
+pub fn render_footer(
+    ui: &mut egui::Ui,
+    status_messages: &mut bool,
+    minimize_to_tray: &mut bool,
+    run_at_startup: &mut bool,
+) {
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
         render_version_info(ui);
         ui.separator();
         render_status_toggle(ui, status_messages);
-
-        // GitHub button on the right side
+        ui.separator();
+        ui.checkbox(minimize_to_tray, "Minimize to tray");
+        ui.checkbox(run_at_startup, "Run at startup");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.button("🌐 GitHub").clicked() {
                 let _ = Command::new("cmd")
@@ -23,7 +28,6 @@ pub fn render_footer(ui: &mut egui::Ui, status_messages: &mut bool) {
         });
     });
 
-    // Add bottom padding for balance
     ui.add_space(8.0);
 }
 

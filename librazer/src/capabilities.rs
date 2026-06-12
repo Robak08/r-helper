@@ -122,11 +122,11 @@ mod tests {
             "RZ09-0421".into(),
             "Razer Blade 15 (2022)".into(),
             0x028a,
-            BladeGeneration::Discovery,
+            BladeGeneration::Legacy4,
             vec![FEATURE_PERF, FEATURE_FAN],
         );
 
-        assert!(d.perf_modes.is_none());
+        assert!(d.perf_modes.as_ref().unwrap().contains(&crate::types::PerfMode::Balanced));
         assert!(d.cpu_boosts.is_none());
         assert!(d.disallowed_boost_pairs.is_empty());
     }

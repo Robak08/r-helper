@@ -15,7 +15,7 @@ pub enum FanZone {
     Zone2 = 0x02,
 }
 
-#[derive(EnumIter, Clone, Copy, Debug, PartialEq, ValueEnum)]
+#[derive(EnumIter, Clone, Copy, Debug, PartialEq, ValueEnum, Serialize, Deserialize)]
 pub enum PerfMode {
     Balanced = 0,
     Performance = 2,
@@ -31,7 +31,7 @@ pub enum MaxFanSpeedMode {
     Disable = 0,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FanMode {
     Auto = 0,
     Manual = 1,
@@ -68,10 +68,18 @@ pub enum LightsAlwaysOn {
     Disable = 0x00,
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    EnumIter, ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize,
+)]
 pub enum BatteryCare {
+    Percent50 = 0xB2,
+    Percent55 = 0xB7,
+    Percent60 = 0xBC,
+    Percent65 = 0xC1,
+    Percent70 = 0xC6,
+    Percent75 = 0xCB,
+    Percent80 = 0xD0,
     Disable = 0x50,
-    Enable = 0xd0,
 }
 
 impl TryFrom<u8> for GpuBoost {
@@ -147,10 +155,91 @@ impl TryFrom<u8> for BatteryCare {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
+            0xB2 => Ok(BatteryCare::Percent50),
+            0xB7 => Ok(BatteryCare::Percent55),
+            0xBC => Ok(BatteryCare::Percent60),
+            0xC1 => Ok(BatteryCare::Percent65),
+            0xC6 => Ok(BatteryCare::Percent70),
+            0xCB => Ok(BatteryCare::Percent75),
+            0xD0 => Ok(BatteryCare::Percent80),
             0x50 => Ok(BatteryCare::Disable),
-            0xd0 => Ok(BatteryCare::Enable),
-            _ => bail!("Failed to convert {} to BatteryCare", value),
+            _ => bail!("Failed to convert {:#x} to BatteryCare", value),
         }
+    }
+}
+
+impl BatteryCare {
+    /// Synapse-aligned charge limits (50–80% in 5% steps, or disabled = 100%).
+    pub const LEVELS: &[BatteryCare] = &[
+        BatteryCare::Disable,
+        BatteryCare::Percent50,
+        BatteryCare::Percent55,
+        BatteryCare::Percent60,
+        BatteryCare::Percent65,
+        BatteryCare::Percent70,
+        BatteryCare::Percent75,
+        BatteryCare::Percent80,
+    ];
+
+    /// Round a percentage to the nearest supported Synapse step.
+    pub fn from_percent(percent: u8) -> Result<Self> {
+        match percent {
+            0..=52 => Ok(BatteryCare::Percent50),
+            53..=57 => Ok(BatteryCare::Percent55),
+            58..=62 => Ok(BatteryCare::Percent60),
+            63..=67 => Ok(BatteryCare::Percent65),
+            68..=72 => Ok(BatteryCare::Percent70),
+            73..=77 => Ok(BatteryCare::Percent75),
+            78..=90 => Ok(BatteryCare::Percent80),
+            91..=100 => Ok(BatteryCare::Disable),
+            _ => bail!("Invalid battery care percentage: {} (must be 50-100)", percent),
+        }
+    }
+
+    pub fn to_percent(self) -> u8 {
+        match self {
+            BatteryCare::Percent50 => 50,
+            BatteryCare::Percent55 => 55,
+            BatteryCare::Percent60 => 60,
+            BatteryCare::Percent65 => 65,
+            BatteryCare::Percent70 => 70,
+            BatteryCare::Percent75 => 75,
+            BatteryCare::Percent80 => 80,
+            BatteryCare::Disable => 100,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BatteryCare::Disable => "Disabled (100%)",
+            BatteryCare::Percent50 => "50%",
+            BatteryCare::Percent55 => "55%",
+            BatteryCare::Percent60 => "60%",
+            BatteryCare::Percent65 => "65%",
+            BatteryCare::Percent70 => "70%",
+            BatteryCare::Percent75 => "75%",
+            BatteryCare::Percent80 => "80%",
+        }
+    }
+}
+
+#[cfg(test)]
+mod battery_care_tests {
+    use super::*;
+
+    #[test]
+    fn battery_care_round_trip_bytes() {
+        for level in BatteryCare::LEVELS {
+            let byte = *level as u8;
+            assert_eq!(BatteryCare::try_from(byte).unwrap(), *level);
+        }
+    }
+
+    #[test]
+    fn battery_care_from_percent() {
+        assert_eq!(BatteryCare::from_percent(50).unwrap(), BatteryCare::Percent50);
+        assert_eq!(BatteryCare::from_percent(80).unwrap(), BatteryCare::Percent80);
+        assert_eq!(BatteryCare::from_percent(100).unwrap(), BatteryCare::Disable);
     }
 }
 
