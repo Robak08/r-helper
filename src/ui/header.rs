@@ -1,41 +1,123 @@
 use crate::messaging::{MessageManager, MessageType};
 use crate::system::SystemSpecs;
 use eframe::egui::{self, Align, Color32, Layout, RichText};
-use librazer::device::Device;
 
 const FADE_START_TIME: f32 = 3.0;
 const FADE_DURATION: f32 = 2.0;
 const FULL_ALPHA: u8 = 255;
 
-/// Renders the application header with device name and status messages
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppTab {
+    Control,
+    Info,
+}
+
+/// Tab bar action from the header row.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TabBarAction {
+    pub selected_tab: Option<AppTab>,
+}
+
+/// Renders the application header with device name and tabs or init status.
 pub fn render_header(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
-    loading: bool,
     system_specs: &SystemSpecs,
-    device: &Option<Device>,
+    device_connected: bool,
     message_manager: &MessageManager,
     detecting_device: bool,
-) {
+    fully_initialized: bool,
+    active_tab: AppTab,
+) -> TabBarAction {
+    let mut tab_action = TabBarAction::default();
+
     ui.horizontal(|ui| {
-        // Device name
-        render_device_name(ui, device, system_specs);
+        render_device_name(ui, device_connected, system_specs);
 
-        // Status messages and connection status
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if loading {
-                ui.spinner();
+            if fully_initialized {
+                tab_action = render_tab_bar(ui, active_tab);
+            } else {
+                render_init_status(ui, ctx, device_connected, detecting_device);
             }
-
-            // Status/warning messages
-            render_status_messages(ui, ctx, message_manager, device, detecting_device);
         });
     });
+
+    if fully_initialized {
+        render_toast_message(ui, ctx, message_manager);
+    }
+
+    tab_action
+}
+
+fn render_tab_bar(ui: &mut egui::Ui, active_tab: AppTab) -> TabBarAction {
+    let mut action = TabBarAction::default();
+
+    ui.horizontal(|ui| {
+        if ui.selectable_label(active_tab == AppTab::Info, "Info").clicked() {
+            action.selected_tab = Some(AppTab::Info);
+        }
+        if ui.selectable_label(active_tab == AppTab::Control, "Control").clicked() {
+            action.selected_tab = Some(AppTab::Control);
+        }
+    });
+
+    action
+}
+
+fn render_init_status(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    device_connected: bool,
+    detecting_device: bool,
+) {
+    if !device_connected {
+        if detecting_device {
+            ui.add(
+                egui::Label::new(RichText::new("🔎 Detecting device…").color(Color32::LIGHT_BLUE))
+                    .selectable(false),
+            );
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        } else {
+            ui.add(
+                egui::Label::new(RichText::new("❌ No device detected").color(Color32::RED))
+                    .selectable(false),
+            );
+        }
+    } else {
+        ui.add(
+            egui::Label::new(RichText::new("Initializing…").color(Color32::LIGHT_BLUE))
+                .selectable(false),
+        );
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+}
+
+fn render_toast_message(ui: &mut egui::Ui, ctx: &egui::Context, message_manager: &MessageManager) {
+    let Some(current_message) = message_manager.get_current_message() else {
+        return;
+    };
+
+    let elapsed = current_message.age_seconds();
+    let (base_color, icon) = get_message_style_from_type(&current_message.message_type);
+    let alpha = calculate_fade_alpha(elapsed);
+    let faded_color = apply_alpha_to_color(base_color, alpha);
+
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("{} {}", icon, current_message.content)).color(faded_color),
+        )
+        .selectable(false),
+    );
+
+    if current_message.should_fade() {
+        ctx.request_repaint();
+    }
 }
 
 /// Renders device name section
-fn render_device_name(ui: &mut egui::Ui, device: &Option<Device>, system_specs: &SystemSpecs) {
-    let device_text = if device.is_some() || system_specs.device_model != "Unknown" {
+fn render_device_name(ui: &mut egui::Ui, device_connected: bool, system_specs: &SystemSpecs) {
+    let device_text = if device_connected || system_specs.device_model != "Unknown" {
         if system_specs.device_model != "Unknown" {
             format!("💻 {}", system_specs.device_model)
         } else {
@@ -46,54 +128,6 @@ fn render_device_name(ui: &mut egui::Ui, device: &Option<Device>, system_specs: 
     };
 
     ui.add(egui::Label::new(egui::RichText::new(device_text).heading()).selectable(false));
-}
-
-/// Renders status messages with fade animation
-fn render_status_messages(
-    ui: &mut egui::Ui,
-    ctx: &egui::Context,
-    message_manager: &MessageManager,
-    device: &Option<Device>,
-    detecting_device: bool,
-) {
-    if let Some(current_message) = message_manager.get_current_message() {
-        let elapsed = current_message.age_seconds();
-
-        // Calculate fade and apply to message
-        let (base_color, icon) = get_message_style_from_type(&current_message.message_type);
-        let alpha = calculate_fade_alpha(elapsed);
-        let faded_color = apply_alpha_to_color(base_color, alpha);
-
-        ui.add(
-            egui::Label::new(
-                RichText::new(format!("{} {}", icon, current_message.content)).color(faded_color),
-            )
-            .selectable(false),
-        );
-
-        // Request repaint for smooth animation
-        if current_message.should_fade() {
-            ctx.request_repaint();
-        }
-    } else {
-        // Show connection status when no device detected
-        if device.is_none() {
-            if detecting_device {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new("🔎 Detecting device…").color(Color32::LIGHT_BLUE),
-                    )
-                    .selectable(false),
-                );
-                ctx.request_repaint();
-            } else {
-                ui.add(
-                    egui::Label::new(RichText::new("❌ No device detected").color(Color32::RED))
-                        .selectable(false),
-                );
-            }
-        }
-    }
 }
 
 /// Message style based on type

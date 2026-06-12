@@ -74,6 +74,8 @@ pub fn render_profiles_section(
                 action = ProfileAction::SaveBatteryProfile;
             }
         });
+
+        ui.add_space(4.0);
     });
 
     action

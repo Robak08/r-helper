@@ -54,60 +54,6 @@ pub fn clean_display_string(input: &str) -> String {
         .join(" ")
 }
 
-// Device Command Utilities
-
-/// Helper function for device command execution with standard error handling
-/// Returns Ok(success_message) or Err(error_message)
-pub fn execute_device_command_simple<T, F>(
-    device_opt: Option<&librazer::device::Device>,
-    command: F,
-    success_msg: &str,
-    error_prefix: &str,
-) -> Result<String, String>
-where
-    F: FnOnce(&librazer::device::Device) -> Result<T>,
-{
-    if let Some(device) = device_opt {
-        match command(device) {
-            Ok(_) => Ok(success_msg.to_string()),
-            Err(e) => Err(format!("{}: {}", error_prefix, e)),
-        }
-    } else {
-        Err("No device connected".to_string())
-    }
-}
-
-// Device State Management
-
-/// Batch read multiple device states with error handling
-pub struct DeviceStateReader<'a> {
-    device: &'a librazer::device::Device,
-    errors: Vec<String>,
-}
-
-impl<'a> DeviceStateReader<'a> {
-    pub fn new(device: &'a librazer::device::Device) -> Self {
-        Self { device, errors: Vec::new() }
-    }
-
-    pub fn read<T, F>(&mut self, operation: F, operation_name: &str) -> Option<T>
-    where
-        F: FnOnce(&librazer::device::Device) -> Result<T>,
-    {
-        match operation(self.device) {
-            Ok(value) => Some(value),
-            Err(e) => {
-                self.errors.push(format!("Failed to read {}: {}", operation_name, e));
-                None
-            }
-        }
-    }
-
-    pub fn finish(self) -> Vec<String> {
-        self.errors
-    }
-}
-
 // Constants
 
 /// PowerShell executable path on Windows

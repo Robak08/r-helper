@@ -74,28 +74,75 @@ impl BladeGeneration {
 pub struct PidProfile {
     pub pid: u16,
     pub generation: BladeGeneration,
+    /// Marketing name including year when known (e.g. "Razer Blade 16 (2025)").
+    pub marketing_name: &'static str,
 }
 
 /// Known USB PIDs mapped to firmware generation (one entry per hardware revision).
 pub const KNOWN_PROFILES: &[PidProfile] = &[
     // Legacy4
-    PidProfile { pid: 0x0279, generation: BladeGeneration::Legacy4 }, // Blade 17 (2021)
-    PidProfile { pid: 0x026d, generation: BladeGeneration::Legacy4 }, // Blade 15 Advanced (2021)
-    PidProfile { pid: 0x028c, generation: BladeGeneration::Legacy4 }, // Blade 14 (2022)
-    PidProfile { pid: 0x028b, generation: BladeGeneration::Legacy4 }, // Blade 17 (2022)
-    PidProfile { pid: 0x029c, generation: BladeGeneration::Legacy4 }, // Blade 15 (2023)
-    PidProfile { pid: 0x028a, generation: BladeGeneration::Legacy4 }, // Blade 15 (2022)
-    PidProfile { pid: 0x029d, generation: BladeGeneration::Legacy4 }, // Blade 14 (2023)
-    PidProfile { pid: 0x029f, generation: BladeGeneration::Legacy4 }, // Blade 16 (2023)
+    PidProfile {
+        pid: 0x0279,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 17 (2021)",
+    },
+    PidProfile {
+        pid: 0x026d,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 15 Advanced (2021)",
+    },
+    PidProfile {
+        pid: 0x028c,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 14 (2022)",
+    },
+    PidProfile {
+        pid: 0x028b,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 17 (2022)",
+    },
+    PidProfile {
+        pid: 0x029c,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 15 (2023)",
+    },
+    PidProfile {
+        pid: 0x028a,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 15 (2022)",
+    },
+    PidProfile {
+        pid: 0x029d,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 14 (2023)",
+    },
+    PidProfile {
+        pid: 0x029f,
+        generation: BladeGeneration::Legacy4,
+        marketing_name: "Razer Blade 16 (2023)",
+    },
     // Modern6
-    PidProfile { pid: 0x02c5, generation: BladeGeneration::Modern6 }, // Blade 14 (2025)
-    PidProfile { pid: 0x02c6, generation: BladeGeneration::Modern6 }, // Blade 16 (2025)
+    PidProfile {
+        pid: 0x02c5,
+        generation: BladeGeneration::Modern6,
+        marketing_name: "Razer Blade 14 (2025)",
+    },
+    PidProfile {
+        pid: 0x02c6,
+        generation: BladeGeneration::Modern6,
+        marketing_name: "Razer Blade 16 (2025)",
+    },
 ];
 
 pub const GENERIC_FALLBACK: PidProfile = PidProfile {
     pid: 0,
     generation: BladeGeneration::Discovery,
+    marketing_name: "Razer Blade",
 };
+
+pub fn lookup_marketing_name(pid: u16) -> Option<&'static str> {
+    lookup_profile(pid).map(|p| p.marketing_name)
+}
 
 pub fn lookup_profile(pid: u16) -> Option<&'static PidProfile> {
     KNOWN_PROFILES.iter().find(|p| p.pid == pid)

@@ -35,7 +35,7 @@ fn read_device_display_name() -> Result<String> {
 }
 
 impl Device {
-    const RAZER_VID: u16 = 0x1532;
+    pub const RAZER_VID: u16 = crate::enumerate::RAZER_VID;
 
     pub fn info(&self) -> &Descriptor {
         &self.info

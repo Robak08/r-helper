@@ -1,5 +1,7 @@
+pub mod chroma;
 pub mod command;
 pub mod device;
+pub mod enumerate;
 pub mod feature;
 pub mod types;
 

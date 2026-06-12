@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::device::CompleteDeviceState;
+use crate::startup;
 
 const CONFIG_VERSION: u32 = 1;
 
@@ -18,10 +19,24 @@ pub struct AppConfig {
     pub auto_fan_limit_enabled: bool,
     #[serde(default = "default_auto_fan_max_rpm")]
     pub auto_fan_max_rpm: u16,
+    #[serde(default)]
+    pub debug_enabled: bool,
+    #[serde(default = "default_minimize_to_tray")]
+    pub minimize_to_tray: bool,
+    #[serde(default = "default_run_at_startup")]
+    pub run_at_startup: bool,
 }
 
 fn default_auto_fan_max_rpm() -> u16 {
     4500
+}
+
+fn default_minimize_to_tray() -> bool {
+    true
+}
+
+fn default_run_at_startup() -> bool {
+    startup::is_startup_enabled()
 }
 
 impl Default for AppConfig {
@@ -38,6 +53,9 @@ impl Default for AppConfig {
             },
             auto_fan_limit_enabled: false,
             auto_fan_max_rpm: default_auto_fan_max_rpm(),
+            debug_enabled: false,
+            minimize_to_tray: default_minimize_to_tray(),
+            run_at_startup: default_run_at_startup(),
         }
     }
 }
