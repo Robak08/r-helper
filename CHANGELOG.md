@@ -1,4 +1,10 @@
 
+# Startup & Control tab performance (v0.4.9)
+## Fixes
+
+- **Auto fan cap** fixed restoring state from **Saved Settings** 
+
+
 # Startup & Control tab performance (v0.4.8)
 ## Features
 

@@ -94,7 +94,9 @@ impl CompleteDeviceState {
         }
 
         match self.fan_mode {
-            FanMode::Auto => {}
+            FanMode::Auto => {
+                command::set_fan_mode(device, FanMode::Auto)?;
+            }
             FanMode::Manual => {
                 command::set_fan_mode(device, FanMode::Manual)?;
                 std::thread::sleep(Duration::from_millis(50));

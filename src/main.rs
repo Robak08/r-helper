@@ -398,7 +398,63 @@ impl RazerGuiApp {
         self.apply_complete_state_to_status(&state, fan_actual_rpm);
         self.device_state = Some(state);
         self.device_hydrated = true;
+        self.reconcile_auto_fan_cap_state();
         Ok(())
+    }
+
+    fn active_profile_fan_mode(&self) -> FanMode {
+        let profile = if self.ac_power {
+            &self.ac_profile
+        } else {
+            &self.battery_profile
+        };
+        profile.fan_mode
+    }
+
+    /// Fix device/UI drift when auto RPM cap left the hardware in manual mode.
+    fn reconcile_auto_fan_cap_state(&mut self) {
+        if !self.auto_fan_limit_enabled || self.auto_fan_max_rpm_editing {
+            return;
+        }
+
+        let Some(device) = self.device.as_ref() else {
+            return;
+        };
+
+        let Some((fan_mode, set_rpm)) =
+            device.with(|d| Some(Self::read_current_fan_state(d))).flatten()
+        else {
+            return;
+        };
+
+        if fan_mode != FanMode::Manual {
+            return;
+        }
+
+        let Some(set_rpm) = set_rpm else {
+            return;
+        };
+
+        let max = self.auto_fan_max_rpm;
+        if set_rpm != max {
+            return;
+        }
+
+        let ui_expects_auto = self.is_user_auto_mode()
+            || self.active_profile_fan_mode() == FanMode::Auto;
+        if !ui_expects_auto {
+            return;
+        }
+
+        let actual = self.status.fan_actual_rpm.unwrap_or(max);
+        if actual > max {
+            self.auto_fan_cap_override = true;
+            self.status.fan_speed = "Auto".to_string();
+            self.status.fan_rpm = Some(max);
+            return;
+        }
+
+        self.restore_auto_fan_mode();
     }
 
     fn on_device_attached(&mut self) {
@@ -460,6 +516,11 @@ impl RazerGuiApp {
         self.status.fan_actual_rpm = snapshot.fan_actual_rpm;
         if self.status.fan_speed.eq_ignore_ascii_case("manual") {
             self.apply_device_fan_status(snapshot.fan_mode, snapshot.fan_set_rpm);
+        } else if self.auto_fan_limit_enabled
+            && snapshot.fan_mode == FanMode::Manual
+            && snapshot.fan_set_rpm == Some(self.auto_fan_max_rpm)
+        {
+            self.reconcile_auto_fan_cap_state();
         }
 
         if let Some(brightness) = snapshot.keyboard_brightness {
@@ -1098,6 +1159,16 @@ impl RazerGuiApp {
         }
     }
 
+    fn run_fan_enforcement(&mut self) {
+        if self.fully_initialized && self.device.is_some() && !self.loading {
+            self.reconcile_auto_fan_cap_state();
+            self.enforce_auto_fan_max_rpm();
+            if self.last_fan_enforce_time.elapsed().as_secs_f32() >= 1.0 {
+                self.enforce_manual_fan_rpm();
+            }
+        }
+    }
+
     fn enforce_auto_fan_max_rpm(&mut self) {
         if !self.auto_fan_limit_enabled
             || !self.is_user_auto_mode()
@@ -1140,6 +1211,7 @@ impl RazerGuiApp {
         if let Some(device) = self.device.as_ref() {
             match device.with_mut(|d| command::set_fan_mode(d, FanMode::Auto)) {
                 Some(Ok(())) => {
+                    self.status.fan_speed = "Auto".to_string();
                     self.status.fan_rpm = None;
                     self.set_optional_status_message("Auto fan mode restored".into());
                 }
@@ -1458,6 +1530,7 @@ impl RazerGuiApp {
         self.poll_slow.store(true, Ordering::Relaxed);
         self.process_background_initialization();
         self.process_poll_snapshots(ctx);
+        self.run_fan_enforcement();
     }
 }
 
@@ -1507,12 +1580,7 @@ impl eframe::App for RazerGuiApp {
             return;
         }
 
-        if !minimized && self.fully_initialized && self.device.is_some() && !self.loading {
-            self.enforce_auto_fan_max_rpm();
-            if self.last_fan_enforce_time.elapsed().as_secs_f32() >= 1.0 {
-                self.enforce_manual_fan_rpm();
-            }
-        }
+        self.run_fan_enforcement();
         // Enforce a minimum detecting period before showing "No device detected"
         if self.detecting_device && self.device.is_none() && self.device_detection_done {
             if std::time::Instant::now() >= self.min_detecting_until {
