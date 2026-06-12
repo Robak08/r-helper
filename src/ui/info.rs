@@ -113,7 +113,7 @@ pub fn render_info_tab(
 
 fn render_razer_devices(ui: &mut egui::Ui, devices: &[RazerDeviceSummary]) {
     ui.group(|ui| {
-        ui.label(RichText::new("🖱️ Connected peripherals").strong());
+        ui.label(RichText::new("🎧 Connected peripherals").strong());
         ui.separator();
 
         if devices.is_empty() {
