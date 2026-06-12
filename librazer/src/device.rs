@@ -1,5 +1,7 @@
-use crate::descriptor::{Descriptor, SUPPORTED};
+use crate::capabilities::{probe_features, resolve_descriptor, run_init_cmds};
+use crate::descriptor::Descriptor;
 use crate::packet::Packet;
+use crate::profile::{infer_generation_from_sku, lookup_profile};
 
 use anyhow::{anyhow, Context, Result};
 use std::{thread, time};
@@ -9,17 +11,27 @@ pub struct Device {
     pub info: Descriptor,
 }
 
-// Read the model id and clip to conform with https://mysupport.razer.com/app/answers/detail/a_id/5481
-fn read_device_model() -> Result<String> {
+fn read_bios_value(name: &str) -> Result<String> {
     #[cfg(target_os = "windows")]
     {
         let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
         let bios = hklm.open_subkey("HARDWARE\\DESCRIPTION\\System\\BIOS")?;
-        let system_sku: String = bios.get_value("SystemSKU")?;
-        Ok(system_sku.chars().take(10).collect())
+        bios.get_value(name).context(format!("Failed to read BIOS value {}", name))
     }
     #[cfg(not(target_os = "windows"))]
-    anyhow::bail!("Automatic model detection is not implemented for this platform")
+    {
+        let _ = name;
+        anyhow::bail!("Automatic model detection is not implemented for this platform")
+    }
+}
+
+// Read the model id and clip to conform with https://mysupport.razer.com/app/answers/detail/a_id/5481
+fn read_device_model() -> Result<String> {
+    Ok(read_bios_value("SystemSKU")?.chars().take(10).collect())
+}
+
+fn read_device_display_name() -> Result<String> {
+    read_bios_value("SystemProductName")
 }
 
 impl Device {
@@ -29,26 +41,49 @@ impl Device {
         &self.info
     }
 
-    pub fn new(descriptor: Descriptor) -> Result<Device> {
+    fn open_hid(pid: u16) -> Result<hidapi::HidDevice> {
         let api = hidapi::HidApi::new().context("Failed to create hid api")?;
 
-        // there are multiple devices with the same pid, pick first that support feature report
-        for info in api.device_list().filter(|info| {
-            (info.vendor_id(), info.product_id()) == (Device::RAZER_VID, descriptor.pid)
-        }) {
-            let path = info.path();
-            let device = api.open_path(path)?;
+        for info in api
+            .device_list()
+            .filter(|info| (info.vendor_id(), info.product_id()) == (Device::RAZER_VID, pid))
+        {
+            let device = api.open_path(info.path())?;
             if device.send_feature_report(&[0, 0]).is_ok() {
-                return Ok(Device { device, info: descriptor.clone() });
+                return Ok(device);
             }
         }
-        anyhow::bail!("Failed to open device {:?}", descriptor)
+        anyhow::bail!("Failed to open Razer device with PID {:04x}", pid)
+    }
+
+    fn open_by_pid(pid: u16) -> Result<Device> {
+        let hid = Self::open_hid(pid)?;
+        Ok(Device {
+            device: hid,
+            info: Descriptor {
+                model_sku: String::new(),
+                display_name: String::new(),
+                pid,
+                features: Vec::new(),
+                perf_modes: None,
+                cpu_boosts: None,
+                gpu_boosts: None,
+                disallowed_boost_pairs: Vec::new(),
+            },
+        })
+    }
+
+    fn pick_target_pid(pid_list: &[u16]) -> u16 {
+        pid_list
+            .iter()
+            .copied()
+            .find(|pid| lookup_profile(*pid).is_some())
+            .or_else(|| pid_list.first().copied())
+            .expect("pid_list is non-empty")
     }
 
     pub fn send(&self, report: Packet) -> Result<Packet> {
-        // extra byte for report id
         let mut response_buf: Vec<u8> = vec![0x00; 1 + std::mem::size_of::<Packet>()];
-        //println!("Report {:?}", report);
 
         const MAX_RETRIES: usize = 5;
 
@@ -57,7 +92,7 @@ impl Device {
 
             self.device
                 .send_feature_report(
-                    [0_u8; 1] // report id
+                    [0_u8; 1]
                         .iter()
                         .copied()
                         .chain(Into::<Vec<u8>>::into(&report).into_iter())
@@ -73,9 +108,7 @@ impl Device {
                 return Err(anyhow!("Response size != {}", response_buf.len()));
             }
 
-            // skip report id byte
             let response = <&[u8] as TryInto<Packet>>::try_into(&response_buf[1..])?;
-            //println!("Response {:?}", response);
 
             if response.ensure_matches_report(&report).is_ok() {
                 return Ok(response);
@@ -83,7 +116,6 @@ impl Device {
                 return Err(anyhow!("Failed to match report after {} attempts", MAX_RETRIES));
             }
 
-            // Add a small delay before retrying
             thread::sleep(time::Duration::from_millis(500));
         }
 
@@ -111,18 +143,25 @@ impl Device {
     }
 
     pub fn detect() -> Result<Device> {
-        let (pid_list, model_number_prefix) = Device::enumerate()?;
+        let (pid_list, model_sku) = Device::enumerate()?;
+        let display_name = read_device_display_name().unwrap_or_else(|_| model_sku.clone());
 
-        match SUPPORTED
-            .iter()
-            .find(|supported| model_number_prefix.starts_with(&supported.model_number_prefix))
-        {
-            Some(supported) => Device::new(supported.clone()),
-            None => anyhow::bail!(
-                "Model {} with PIDs {:0>4x?} is not supported",
-                model_number_prefix,
-                pid_list
-            ),
+        let target_pid = Self::pick_target_pid(&pid_list);
+        let mut device = Self::open_by_pid(target_pid)?;
+
+        let generation = lookup_profile(target_pid)
+            .map(|p| p.generation)
+            .unwrap_or_else(|| infer_generation_from_sku(&model_sku));
+
+        let probed = probe_features(&device);
+        let descriptor = resolve_descriptor(model_sku, display_name, target_pid, generation, probed);
+        device.info = descriptor;
+
+        let init_cmds = generation.default_init_cmds();
+        if !init_cmds.is_empty() {
+            run_init_cmds(&device, init_cmds)?;
         }
+
+        Ok(device)
     }
 }

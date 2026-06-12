@@ -256,8 +256,8 @@ impl RazerGuiApp {
     fn detect_available_performance_modes(&mut self) {
         // Prefer firmware-advertised list; fallback to full enum when unknown.
         if let Some(ref device) = self.device {
-            if let Some(list) = device.info().perf_modes {
-                self.available_performance_modes = list.to_vec();
+            if let Some(ref list) = device.info().perf_modes {
+                self.available_performance_modes = list.clone();
                 if self.base_performance_modes.is_empty() {
                     self.base_performance_modes = self.available_performance_modes.clone();
                 }
@@ -275,15 +275,14 @@ impl RazerGuiApp {
     ) -> (Vec<CpuBoost>, Vec<GpuBoost>, Vec<(CpuBoost, GpuBoost)>) {
         if let Some(ref device) = self.device {
             let d = device.info();
-            let cpus: Vec<CpuBoost> = d.cpu_boosts.map(|s| s.to_vec()).unwrap_or_else(|| {
+            let cpus: Vec<CpuBoost> = d.cpu_boosts.clone().unwrap_or_else(|| {
                 vec![CpuBoost::Low, CpuBoost::Medium, CpuBoost::High, CpuBoost::Boost]
             });
             let gpus: Vec<GpuBoost> = d
                 .gpu_boosts
-                .map(|s| s.to_vec())
+                .clone()
                 .unwrap_or_else(|| vec![GpuBoost::Low, GpuBoost::Medium, GpuBoost::High]);
-            let pairs: Vec<(CpuBoost, GpuBoost)> =
-                d.disallowed_boost_pairs.map(|p| p.to_vec()).unwrap_or_default();
+            let pairs: Vec<(CpuBoost, GpuBoost)> = d.disallowed_boost_pairs.clone();
             (cpus, gpus, pairs)
         } else {
             (
@@ -401,7 +400,10 @@ impl RazerGuiApp {
                     if present {
                         // Acquire the device on the UI thread.
                         if let Ok(dev) = Device::detect() {
+                            let display_name = dev.info().display_name.clone();
                             self.device = Some(dev);
+                            let specs = get_system_specs(Some(&display_name));
+                            self.system_specs.device_model = specs.device_model;
                         }
                     }
                     self.detect_available_performance_modes();
@@ -411,7 +413,11 @@ impl RazerGuiApp {
                         self.set_status_message("Initializing...".to_string());
                     }
                 }
-                InitMessage::SystemSpecsComplete(specs) => {
+                InitMessage::SystemSpecsComplete(mut specs) => {
+                    if let Some(ref device) = self.device {
+                        specs.device_model =
+                            get_system_specs(Some(&device.info().display_name)).device_model;
+                    }
                     self.system_specs = specs;
                     self.init_specs_complete = true;
                     if self.fully_initialized && self.init_power_read && self.init_specs_complete {
