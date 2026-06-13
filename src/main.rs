@@ -18,6 +18,7 @@ mod system;
 mod thermal_poll;
 mod tray;
 mod ui;
+mod ui_wake;
 mod utils;
 
 use eframe::egui;
@@ -180,6 +181,7 @@ struct RazerGuiApp {
     laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
     shared_thermal: Arc<Mutex<ThermalSnapshot>>,
     last_cooling_pad_sync_time: std::time::Instant,
+    unfocused_wake: Arc<ui_wake::RepaintWake>,
 }
 
 impl RazerGuiApp {
@@ -370,7 +372,7 @@ impl RazerGuiApp {
         self.set_status_message("No device connected".to_string());
     }
 
-    fn new() -> Self {
+    fn new(unfocused_wake: Arc<ui_wake::RepaintWake>) -> Self {
         let app_config = config::AppConfig::load();
         let ac_profile = app_config.ac_profile;
         let battery_profile = app_config.battery_profile;
@@ -489,6 +491,7 @@ impl RazerGuiApp {
             laptop_fan_cap: Arc::new(Mutex::new(LaptopFanCapShared::default())),
             shared_thermal,
             last_cooling_pad_sync_time: now,
+            unfocused_wake,
         };
 
         app.apply_cooling_pad_runtime(cooling_pad_cfg);
@@ -2363,6 +2366,10 @@ impl eframe::App for RazerGuiApp {
         }
 
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let viewport_focused = ctx.input(|i| i.viewport().focused.unwrap_or(i.focused));
+        self.unfocused_wake
+            .set_active(self.is_window_visible() && !viewport_focused);
+
         self.poll_brightness_skip
             .store(self.brightness_slider_active, Ordering::Relaxed);
         self.poll_slow
@@ -2640,7 +2647,8 @@ fn main() -> Result<(), eframe::Error> {
                 tray::set_windows_taskbar_icon(hwnd);
             }
             let tray_guard = tray::TrayHandle::init(tray_icon, Arc::clone(&tray_state));
-            let mut app = RazerGuiApp::new();
+            let unfocused_wake = ui_wake::RepaintWake::new(cc.egui_ctx.clone());
+            let mut app = RazerGuiApp::new(unfocused_wake);
             app.tray_state = Some(tray_state);
             app._tray_guard = Some(tray_guard);
             app.base_window_height = initial_height as f32;

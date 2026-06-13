@@ -2,7 +2,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
 
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
@@ -13,7 +12,7 @@ pub struct TraySharedState {
     hwnd: Mutex<Option<isize>>,
     visible: AtomicBool,
     ctx: eframe::egui::Context,
-    wake_running: AtomicBool,
+    repaint_wake: Arc<crate::ui_wake::RepaintWake>,
 }
 
 impl TraySharedState {
@@ -21,8 +20,8 @@ impl TraySharedState {
         Arc::new(Self {
             hwnd: Mutex::new(None),
             visible: AtomicBool::new(true),
+            repaint_wake: crate::ui_wake::RepaintWake::new(ctx.clone()),
             ctx,
-            wake_running: AtomicBool::new(false),
         })
     }
 
@@ -39,6 +38,7 @@ impl TraySharedState {
         if let Some(hwnd) = hwnd {
             show_window(hwnd);
             self.visible.store(true, Ordering::Relaxed);
+            self.repaint_wake.set_active(false);
             self.ctx.request_repaint();
         }
     }
@@ -48,24 +48,8 @@ impl TraySharedState {
         if let Some(hwnd) = hwnd {
             hide_window(hwnd);
             self.visible.store(false, Ordering::Relaxed);
-            self.spawn_wake_thread();
+            self.repaint_wake.set_active(true);
         }
-    }
-
-    /// eframe stops receiving events while hidden; nudge the loop until restored.
-    fn spawn_wake_thread(self: &Arc<Self>) {
-        if self.wake_running.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let state = Arc::clone(self);
-        std::thread::spawn(move || {
-            while !state.visible.load(Ordering::Relaxed) {
-                state.ctx.request_repaint();
-                std::thread::sleep(Duration::from_secs(2));
-            }
-            state.wake_running.store(false, Ordering::SeqCst);
-        });
     }
 }
 
