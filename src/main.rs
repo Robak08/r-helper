@@ -8,6 +8,7 @@ mod messaging;
 mod power;
 mod startup;
 mod system;
+mod thermal_poll;
 mod tray;
 mod ui;
 mod utils;
@@ -39,7 +40,8 @@ use device_handle::SharedDevice;
 use device_poll::{spawn_device_poller, DevicePollSnapshot};
 use messaging::{error_message, status_message, MessageManager};
 use power::{get_battery_status, get_power_state, BatteryStatus};
-use system::{get_system_specs, resolve_device_model, SystemSpecs};
+use system::{get_system_specs, resolve_device_model, SystemSpecs, ThermalSnapshot};
+use thermal_poll::spawn_thermal_poller;
 use ui::header::{AppTab, TabBarAction};
 use ui::info::{render_info_tab, LaptopInfoView};
 use device_handle::execute_command;
@@ -103,6 +105,8 @@ struct RazerGuiApp {
     fully_initialized: bool,
     init_receiver: Option<mpsc::Receiver<InitMessage>>,
     poll_receiver: Option<mpsc::Receiver<DevicePollSnapshot>>,
+    thermal_receiver: Option<mpsc::Receiver<ThermalSnapshot>>,
+    thermal: ThermalSnapshot,
     poll_brightness_skip: Arc<AtomicBool>,
     poll_slow: Arc<AtomicBool>,
     message_manager: MessageManager,
@@ -239,6 +243,8 @@ impl RazerGuiApp {
             fully_initialized: false,
             init_receiver: Some(init_receiver),
             poll_receiver: None,
+            thermal_receiver: None,
+            thermal: ThermalSnapshot::default(),
             poll_brightness_skip: Arc::new(AtomicBool::new(false)),
             poll_slow: Arc::new(AtomicBool::new(false)),
             message_manager: MessageManager::new(),
@@ -293,8 +299,31 @@ impl RazerGuiApp {
 
         // Start other background initialization (power state, system specs)
         app.start_background_initialization(init_sender);
+        app.start_thermal_poller();
 
         app
+    }
+
+    fn start_thermal_poller(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.thermal_receiver = Some(rx);
+        spawn_thermal_poller(tx, Arc::clone(&self.poll_slow));
+    }
+
+    fn process_thermal_snapshots(&mut self, ctx: &egui::Context) {
+        let mut snapshots = Vec::new();
+        if let Some(ref rx) = self.thermal_receiver {
+            while let Ok(snapshot) = rx.try_recv() {
+                snapshots.push(snapshot);
+            }
+        }
+        if snapshots.is_empty() {
+            return;
+        }
+        if let Some(snapshot) = snapshots.into_iter().last() {
+            self.thermal = snapshot;
+        }
+        ctx.request_repaint();
     }
 
     fn start_device_detection(&mut self, sender: mpsc::Sender<InitMessage>) {
@@ -1241,6 +1270,8 @@ impl RazerGuiApp {
             self.status_messages,
             self.status.performance_mode == "Custom",
             max_enabled,
+            self.thermal.cpu_avg_c,
+            self.thermal.gpu_avg_c,
         );
         if new_toggle != max_enabled && self.status.performance_mode == "Custom" {
             if let Some(device) = self.device.as_ref() {
@@ -1395,6 +1426,8 @@ impl RazerGuiApp {
             battery_time_mins: self.battery_status.time_remaining_mins,
             charge_limit: LaptopInfoView::charge_limit_from_care(self.status.battery_care),
             ac_power: self.ac_power,
+            cpu_avg_temp_c: self.thermal.cpu_avg_c,
+            gpu_avg_temp_c: self.thermal.gpu_avg_c,
             ..LaptopInfoView::default()
         };
 
@@ -1530,6 +1563,7 @@ impl RazerGuiApp {
         self.poll_slow.store(true, Ordering::Relaxed);
         self.process_background_initialization();
         self.process_poll_snapshots(ctx);
+        self.process_thermal_snapshots(ctx);
         self.run_fan_enforcement();
     }
 }
@@ -1562,6 +1596,7 @@ impl eframe::App for RazerGuiApp {
         self.poll_slow
             .store(minimized || !self.is_window_visible(), Ordering::Relaxed);
         self.process_poll_snapshots(ctx);
+        self.process_thermal_snapshots(ctx);
 
         self.message_manager.update();
 

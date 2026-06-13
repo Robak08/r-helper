@@ -1,5 +1,7 @@
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 
+use crate::ui::temp::temp_rich_text;
+
 const MIN_RPM_FOR_COLOR: f32 = 1900.0;
 const MAX_RPM_FOR_COLOR: f32 = 5000.0;
 const MIN_MANUAL_RPM: u16 = 2000;
@@ -31,6 +33,8 @@ pub fn render_fan_section(
     show_status_messages: bool,
     custom_mode_active: bool,
     max_fan_speed_enabled: bool,
+    cpu_avg_temp_c: Option<f32>,
+    gpu_avg_temp_c: Option<f32>,
 ) -> (FanAction, bool) {
     let mut action = FanAction::None;
     let mut toggle_max = max_fan_speed_enabled;
@@ -95,7 +99,14 @@ pub fn render_fan_section(
             }
         }
 
-        render_current_status(ui, fan_speed, auto_fan_limit_enabled, *auto_fan_max_rpm);
+        render_current_status(
+            ui,
+            fan_speed,
+            auto_fan_limit_enabled,
+            *auto_fan_max_rpm,
+            cpu_avg_temp_c,
+            gpu_avg_temp_c,
+        );
     });
 
     (action, toggle_max)
@@ -215,13 +226,30 @@ fn render_current_status(
     fan_speed: &str,
     auto_fan_limit_enabled: bool,
     auto_fan_max_rpm: u16,
+    cpu_avg_temp_c: Option<f32>,
+    gpu_avg_temp_c: Option<f32>,
 ) {
     let status = if fan_speed.eq_ignore_ascii_case("auto") && auto_fan_limit_enabled {
         format!("Auto (max {} RPM)", auto_fan_max_rpm)
     } else {
         fan_speed.to_string()
     };
-    ui.add(egui::Label::new(format!("Current: {}", status)).selectable(false));
+
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(format!("Current: {}", status)).selectable(false),
+        );
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(temp_rich_text("GPU", gpu_avg_temp_c)).selectable(false),
+            );
+            ui.add(egui::Label::new(RichText::new("|").weak()).selectable(false));
+            ui.add(
+                egui::Label::new(temp_rich_text("CPU", cpu_avg_temp_c)).selectable(false),
+            );
+        });
+    });
 }
 
 fn calculate_rpm_color(actual_rpm: u16) -> Color32 {

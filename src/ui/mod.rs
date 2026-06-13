@@ -8,3 +8,4 @@ pub mod info;
 pub mod lighting;
 pub mod performance;
 pub mod profiles;
+pub mod temp;

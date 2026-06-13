@@ -1,5 +1,6 @@
 use eframe::egui::{self, RichText, Vec2};
 
+use crate::ui::temp::info_temp_row;
 use librazer::enumerate::RazerDeviceSummary;
 use librazer::types::BatteryCare;
 
@@ -21,6 +22,8 @@ pub struct LaptopInfoView {
     pub battery_time_mins: Option<u32>,
     pub charge_limit: Option<u8>,
     pub ac_power: bool,
+    pub cpu_avg_temp_c: Option<f32>,
+    pub gpu_avg_temp_c: Option<f32>,
 }
 
 impl Default for LaptopInfoView {
@@ -37,6 +40,8 @@ impl Default for LaptopInfoView {
             battery_time_mins: None,
             charge_limit: None,
             ac_power: true,
+            cpu_avg_temp_c: None,
+            gpu_avg_temp_c: None,
         }
     }
 }
@@ -71,6 +76,8 @@ pub fn render_info_tab(
                         if !info.gpus.is_empty() {
                             info_row(ui, "GPU", &info.gpus.join(", "));
                         }
+                        info_temp_row(ui, "CPU temp", info.cpu_avg_temp_c);
+                        info_temp_row(ui, "GPU temp", info.gpu_avg_temp_c);
                     });
                 });
         });

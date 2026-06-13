@@ -1,4 +1,15 @@
 
+# CPU/GPU average temperatures (v0.5.0)
+## Features
+
+- **CPU/GPU average temps** — Shown in the Info tab laptop card and bottom-right of Fan Control.
+- **Thermal polling** — Background thread reads LibreHardwareMonitor WMI when available, with NVIDIA NVML and ACPI fallbacks.
+
+## Fixes
+
+- **CPU temp fallback** — Uses Windows thermal performance counters when LHM is not running (ACPI WMI often requires admin).
+- **CPU temp accuracy** — Reads Package/hottest core via LHM, or the primary ACPI `\_TZ` zone instead of averaging cooler EC zones.
+
 # Startup & Control tab performance (v0.4.9)
 ## Fixes
 
