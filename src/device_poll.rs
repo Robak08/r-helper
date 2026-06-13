@@ -89,6 +89,7 @@ pub fn spawn_device_poller(
     tx: Sender<DevicePollSnapshot>,
     brightness_slider_active: Arc<AtomicBool>,
     poll_slow: Arc<AtomicBool>,
+    laptop_fan_rpm: Arc<Mutex<Option<u16>>>,
 ) {
     std::thread::spawn(move || {
         let mut last_slow = Instant::now()
@@ -119,6 +120,10 @@ pub fn spawn_device_poller(
 
             if snapshot.full_state.is_some() {
                 last_slow = Instant::now();
+            }
+
+            if let Ok(mut shared) = laptop_fan_rpm.lock() {
+                *shared = snapshot.fan_actual_rpm;
             }
 
             if tx.send(snapshot).is_err() {
