@@ -11,6 +11,8 @@ use librazer::{
     types::{BatteryCare, FanMode, FanZone, LightsAlwaysOn},
 };
 
+use librazer::cooling_pad::CoolingPadDevice;
+
 use crate::device::CompleteDeviceState;
 use crate::power::get_power_state;
 
@@ -28,6 +30,52 @@ pub struct DevicePollSnapshot {
     pub lights_always_on: bool,
     pub battery_care: BatteryCare,
     pub full_state: Option<CompleteDeviceState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoolingPadPollSnapshot {
+    pub brightness: Option<u8>,
+}
+
+pub fn spawn_cooling_pad_poller(
+    device: Arc<Mutex<CoolingPadDevice>>,
+    tx: Sender<CoolingPadPollSnapshot>,
+    brightness_slider_active: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        loop {
+            if !cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(FAST_POLL_INTERVAL);
+
+            let snapshot = {
+                let device = match device.try_lock() {
+                    Ok(guard) => guard,
+                    Err(_) => continue,
+                };
+                read_cooling_pad_snapshot(&device, brightness_slider_active.load(Ordering::Relaxed))
+            };
+
+            if tx.send(snapshot).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn read_cooling_pad_snapshot(
+    device: &CoolingPadDevice,
+    skip_brightness: bool,
+) -> CoolingPadPollSnapshot {
+    let brightness = if skip_brightness || !device.chroma_available() {
+        None
+    } else {
+        device.brightness().ok()
+    };
+
+    CoolingPadPollSnapshot { brightness }
 }
 
 pub fn spawn_device_poller(

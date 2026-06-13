@@ -21,7 +21,20 @@ pub struct RazerHidEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RazerDeviceKind {
     BladeLaptop,
+    CoolingPad,
     Peripheral,
+}
+
+pub const COOLING_PAD_PID: u16 = 0x0F43;
+
+fn device_kind(pid: u16) -> RazerDeviceKind {
+    if lookup_profile(pid).is_some() {
+        RazerDeviceKind::BladeLaptop
+    } else if pid == COOLING_PAD_PID {
+        RazerDeviceKind::CoolingPad
+    } else {
+        RazerDeviceKind::Peripheral
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,11 +94,7 @@ pub fn summarize_razer_devices(entries: &[RazerHidEntry]) -> Vec<RazerDeviceSumm
         summaries.push(RazerDeviceSummary {
             pid: entry.pid,
             name: best_name(entry),
-            kind: if lookup_profile(entry.pid).is_some() {
-                RazerDeviceKind::BladeLaptop
-            } else {
-                RazerDeviceKind::Peripheral
-            },
+            kind: device_kind(entry.pid),
             interface_count: 1,
             battery_percent: None,
             battery_charging: None,
@@ -96,7 +105,7 @@ pub fn summarize_razer_devices(entries: &[RazerHidEntry]) -> Vec<RazerDeviceSumm
     summaries
 }
 
-/// Like [`summarize_razer_devices`], but excludes Blade laptop control interfaces.
+/// Like [`summarize_razer_devices`], but excludes Blade laptop and cooling pad interfaces.
 pub fn summarize_peripheral_devices(entries: &[RazerHidEntry]) -> Vec<RazerDeviceSummary> {
     summarize_razer_devices(entries)
         .into_iter()
@@ -107,7 +116,7 @@ pub fn summarize_peripheral_devices(entries: &[RazerHidEntry]) -> Vec<RazerDevic
 /// Query wireless peripheral battery levels (best-effort; wired devices typically fail).
 pub fn enrich_peripheral_batteries(entries: &[RazerHidEntry], summaries: &mut [RazerDeviceSummary]) {
     for summary in summaries.iter_mut() {
-        if summary.kind == RazerDeviceKind::BladeLaptop {
+        if summary.kind == RazerDeviceKind::BladeLaptop || summary.kind == RazerDeviceKind::CoolingPad {
             continue;
         }
 

@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod cooling_pad_auto;
+mod cooling_pad_handle;
 mod device;
 mod device_handle;
 mod device_poll;
@@ -26,7 +28,9 @@ use librazer::types::{
     BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode,
 };
 use librazer::{
+    chroma::Rgb,
     command,
+    cooling_pad::{is_present, CoolingPadDevice, PadLightingMode},
     device::Device,
     enumerate::{
         enrich_peripheral_batteries, list_razer_hid_devices, summarize_peripheral_devices,
@@ -36,14 +40,21 @@ use librazer::{
 use strum::IntoEnumIterator;
 
 use device::CompleteDeviceState;
+use cooling_pad_auto::{
+    compute_combined_auto, CoolingPadAutoInputs, CoolingPadAutoOutput, CoolingPadAutoState,
+};
+use cooling_pad_handle::SharedCoolingPad;
 use device_handle::SharedDevice;
-use device_poll::{spawn_device_poller, DevicePollSnapshot};
+use device_poll::{
+    spawn_cooling_pad_poller, spawn_device_poller, CoolingPadPollSnapshot, DevicePollSnapshot,
+};
 use messaging::{error_message, status_message, MessageManager};
 use power::{get_battery_status, get_power_state, BatteryStatus};
 use system::{get_system_specs, resolve_device_model, SystemSpecs, ThermalSnapshot};
 use thermal_poll::spawn_thermal_poller;
+use ui::cooling_pad_fan::CoolingPadFanMode;
 use ui::header::{AppTab, TabBarAction};
-use ui::info::{render_info_tab, LaptopInfoView};
+use ui::info::{render_info_tab, CoolingPadInfoView, LaptopInfoView};
 use device_handle::execute_command;
 
 // Dynamic app metadata from Cargo
@@ -149,6 +160,33 @@ struct RazerGuiApp {
     cached_allowed_cpu: Vec<CpuBoost>,
     cached_allowed_gpu: Vec<GpuBoost>,
     cached_disallowed_pairs: Vec<(CpuBoost, GpuBoost)>,
+
+    cooling_pad: Option<SharedCoolingPad>,
+    cooling_pad_fan_mode: CoolingPadFanMode,
+    cooling_pad_manual_rpm: u16,
+    cooling_pad_auto_min_rpm: u16,
+    cooling_pad_auto_max_rpm: u16,
+    cooling_pad_auto_off_below_c: f32,
+    cooling_pad_auto_full_above_c: f32,
+    cooling_pad_auto_turn_on_delay_secs: f32,
+    cooling_pad_auto_turn_off_delay_secs: f32,
+    cooling_pad_auto_temp_ema_alpha: f32,
+    cooling_pad_auto_rpm_slew_up_per_sec: u16,
+    cooling_pad_auto_rpm_slew_down_per_sec: u16,
+    cooling_pad_auto_follow_temp_margin_c: f32,
+    cooling_pad_auto_temp_hysteresis_c: f32,
+    cooling_pad_auto_state: CoolingPadAutoState,
+    cooling_pad_lighting_mode: String,
+    cooling_pad_color: [u8; 3],
+    cooling_pad_brightness_step: usize,
+    cooling_pad_brightness_slider_active: bool,
+    cooling_pad_chroma_available: bool,
+    cooling_pad_poll_receiver: Option<mpsc::Receiver<CoolingPadPollSnapshot>>,
+    cooling_pad_poll_brightness_skip: Arc<AtomicBool>,
+    cooling_pad_poller_cancel: Arc<AtomicBool>,
+    cooling_pad_ignore_brightness_poll_until: Option<std::time::Instant>,
+    last_cooling_pad_fan_enforce_time: std::time::Instant,
+    last_cooling_pad_detect_attempt: std::time::Instant,
 }
 
 impl RazerGuiApp {
@@ -221,6 +259,7 @@ impl RazerGuiApp {
         let status_messages = app_config.debug_enabled;
         let minimize_to_tray = app_config.minimize_to_tray;
         let run_at_startup = app_config.run_at_startup;
+        let cooling_pad_cfg = app_config.cooling_pad.clone();
         if let Err(e) = startup::set_startup_enabled(run_at_startup) {
             eprintln!("Failed to sync run-at-startup with registry: {}", e);
         }
@@ -276,7 +315,7 @@ impl RazerGuiApp {
             device_detection_done: false,
             min_detecting_until: now + std::time::Duration::from_secs(1),
 
-            active_tab: AppTab::Control,
+            active_tab: AppTab::Laptop,
             battery_status: get_battery_status(),
             last_battery_refresh: now,
             razer_devices: Vec::new(),
@@ -292,6 +331,33 @@ impl RazerGuiApp {
             ],
             cached_allowed_gpu: vec![GpuBoost::Low, GpuBoost::Medium, GpuBoost::High],
             cached_disallowed_pairs: Vec::new(),
+
+            cooling_pad: None,
+            cooling_pad_fan_mode: CoolingPadFanMode::from_config(&cooling_pad_cfg.fan_mode),
+            cooling_pad_manual_rpm: cooling_pad_cfg.manual_rpm,
+            cooling_pad_auto_min_rpm: cooling_pad_cfg.auto_min_rpm,
+            cooling_pad_auto_max_rpm: cooling_pad_cfg.auto_max_rpm,
+            cooling_pad_auto_off_below_c: cooling_pad_cfg.auto_off_below_c,
+            cooling_pad_auto_full_above_c: cooling_pad_cfg.auto_full_above_c,
+            cooling_pad_auto_turn_on_delay_secs: cooling_pad_cfg.auto_turn_on_delay_secs,
+            cooling_pad_auto_turn_off_delay_secs: cooling_pad_cfg.auto_turn_off_delay_secs,
+            cooling_pad_auto_temp_ema_alpha: cooling_pad_cfg.auto_temp_ema_alpha,
+            cooling_pad_auto_rpm_slew_up_per_sec: cooling_pad_cfg.auto_rpm_slew_up_per_sec,
+            cooling_pad_auto_rpm_slew_down_per_sec: cooling_pad_cfg.auto_rpm_slew_down_per_sec,
+            cooling_pad_auto_follow_temp_margin_c: cooling_pad_cfg.auto_follow_temp_margin_c,
+            cooling_pad_auto_temp_hysteresis_c: cooling_pad_cfg.auto_temp_hysteresis_c,
+            cooling_pad_auto_state: CoolingPadAutoState::default(),
+            cooling_pad_lighting_mode: cooling_pad_cfg.lighting_mode,
+            cooling_pad_color: cooling_pad_cfg.color,
+            cooling_pad_brightness_step: cooling_pad_cfg.brightness_step,
+            cooling_pad_brightness_slider_active: false,
+            cooling_pad_chroma_available: false,
+            cooling_pad_poll_receiver: None,
+            cooling_pad_poll_brightness_skip: Arc::new(AtomicBool::new(false)),
+            cooling_pad_poller_cancel: Arc::new(AtomicBool::new(false)),
+            cooling_pad_ignore_brightness_poll_until: None,
+            last_cooling_pad_fan_enforce_time: std::time::Instant::now(),
+            last_cooling_pad_detect_attempt: now,
         };
 
         // Kick off async device detection so the UI can show a clear “Detecting device…” state.
@@ -520,6 +586,179 @@ impl RazerGuiApp {
         );
     }
 
+    fn try_attach_cooling_pad(&mut self) {
+        if self.cooling_pad.is_some() {
+            return;
+        }
+        match CoolingPadDevice::detect() {
+            Ok(pad) => {
+                self.cooling_pad_chroma_available = pad.chroma_available();
+                self.cooling_pad = Some(SharedCoolingPad::new(pad));
+                self.start_cooling_pad_poller();
+                self.apply_cooling_pad_config_to_device();
+                self.set_optional_status_message("Cooling pad connected".into());
+            }
+            Err(e) => {
+                if is_present() {
+                    eprintln!("Cooling pad detected but failed to open: {e}");
+                }
+            }
+        }
+    }
+
+    fn start_cooling_pad_poller(&mut self) {
+        if self.cooling_pad_poll_receiver.is_some() {
+            return;
+        }
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        self.cooling_pad_poller_cancel.store(true, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        self.cooling_pad_poll_receiver = Some(rx);
+        spawn_cooling_pad_poller(
+            pad.arc(),
+            tx,
+            Arc::clone(&self.cooling_pad_poll_brightness_skip),
+            Arc::clone(&self.cooling_pad_poller_cancel),
+        );
+    }
+
+    fn process_cooling_pad_poll_snapshots(&mut self, ctx: &egui::Context) {
+        let mut snapshots = Vec::new();
+        if let Some(ref rx) = self.cooling_pad_poll_receiver {
+            while let Ok(snapshot) = rx.try_recv() {
+                snapshots.push(snapshot);
+            }
+        }
+        if snapshots.is_empty() {
+            return;
+        }
+        for snapshot in snapshots {
+            self.apply_cooling_pad_poll_snapshot(snapshot);
+        }
+        ctx.request_repaint();
+    }
+
+    fn mark_cooling_pad_lighting_changed(&mut self) {
+        self.cooling_pad_ignore_brightness_poll_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    }
+
+    fn apply_cooling_pad_poll_snapshot(&mut self, snapshot: CoolingPadPollSnapshot) {
+        let ignore_brightness = self
+            .cooling_pad_ignore_brightness_poll_until
+            .is_some_and(|until| std::time::Instant::now() < until);
+
+        if let Some(brightness) = snapshot.brightness {
+            if !ignore_brightness && !self.cooling_pad_brightness_slider_active {
+                self.cooling_pad_brightness_step =
+                    ui::lighting::raw_brightness_to_step_index(brightness);
+            }
+        }
+
+        if self
+            .cooling_pad_ignore_brightness_poll_until
+            .is_some_and(|until| std::time::Instant::now() >= until)
+        {
+            self.cooling_pad_ignore_brightness_poll_until = None;
+        }
+    }
+
+    fn cooling_pad_display_rpm(&self) -> Option<u16> {
+        match self.cooling_pad_fan_mode {
+            CoolingPadFanMode::Off => None,
+            CoolingPadFanMode::Manual => Some(self.cooling_pad_manual_rpm),
+            CoolingPadFanMode::Auto => {
+                if self.cooling_pad_auto_state.fan_running {
+                    self.cooling_pad_auto_state.last_rpm
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn compute_cooling_pad_auto_output(&mut self) -> CoolingPadAutoOutput {
+        let dt = self
+            .last_cooling_pad_fan_enforce_time
+            .elapsed()
+            .as_secs_f32()
+            .clamp(0.05, 3.0);
+        let inputs = CoolingPadAutoInputs {
+            cpu_temp_c: self.thermal.cpu_avg_c,
+            gpu_temp_c: self.thermal.gpu_avg_c,
+            laptop_fan_actual_rpm: self.status.fan_actual_rpm,
+            min_rpm: self.cooling_pad_auto_min_rpm,
+            max_rpm: self.cooling_pad_auto_max_rpm,
+            off_below_c: self.cooling_pad_auto_off_below_c,
+            full_above_c: self.cooling_pad_auto_full_above_c,
+            temp_hysteresis_c: self.cooling_pad_auto_temp_hysteresis_c,
+            dt_secs: dt,
+            turn_on_delay_secs: self.cooling_pad_auto_turn_on_delay_secs,
+            turn_off_delay_secs: self.cooling_pad_auto_turn_off_delay_secs,
+            temp_ema_alpha: self.cooling_pad_auto_temp_ema_alpha,
+            rpm_slew_up_per_sec: self.cooling_pad_auto_rpm_slew_up_per_sec,
+            rpm_slew_down_per_sec: self.cooling_pad_auto_rpm_slew_down_per_sec,
+            follow_temp_margin_c: self.cooling_pad_auto_follow_temp_margin_c,
+        };
+        compute_combined_auto(&inputs, &mut self.cooling_pad_auto_state)
+    }
+
+    fn schedule_cooling_pad_redetect(&mut self) {
+        self.last_cooling_pad_detect_attempt = std::time::Instant::now()
+            - std::time::Duration::from_secs(3);
+    }
+
+    fn detach_cooling_pad(&mut self) {
+        if self.cooling_pad.is_none() {
+            return;
+        }
+        self.cooling_pad_poller_cancel.store(false, Ordering::Relaxed);
+        self.cooling_pad_poll_receiver = None;
+        self.cooling_pad = None;
+        self.cooling_pad_chroma_available = false;
+        if self.active_tab == AppTab::CoolingPad {
+            self.active_tab = AppTab::Laptop;
+        }
+        self.schedule_cooling_pad_redetect();
+        self.set_optional_status_message("Cooling pad disconnected".into());
+    }
+
+    fn cooling_pad_needs_detach(&self) -> bool {
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return false;
+        };
+        !is_present()
+            || !pad
+                .with(|p| p.is_responsive())
+                .unwrap_or(false)
+    }
+
+    fn try_detect_cooling_pad_hotplug(&mut self) {
+        if self.last_cooling_pad_detect_attempt.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.last_cooling_pad_detect_attempt = std::time::Instant::now();
+
+        if self.cooling_pad.is_some() {
+            if self.cooling_pad_needs_detach() {
+                self.detach_cooling_pad();
+            }
+            return;
+        }
+
+        if is_present() {
+            self.try_attach_cooling_pad();
+        }
+    }
+
+    fn shutdown_cooling_pad(&mut self) {
+        if let Some(pad) = self.cooling_pad.as_ref() {
+            let _ = pad.with(|p| p.fan_off());
+        }
+    }
+
     fn process_poll_snapshots(&mut self, ctx: &egui::Context) {
         let mut snapshots = Vec::new();
         if let Some(ref rx) = self.poll_receiver {
@@ -540,6 +779,7 @@ impl RazerGuiApp {
         if snapshot.ac_power != self.ac_power {
             self.ac_power = snapshot.ac_power;
             self.auto_switch_profile();
+            self.schedule_cooling_pad_redetect();
         }
 
         self.status.fan_actual_rpm = snapshot.fan_actual_rpm;
@@ -655,6 +895,7 @@ impl RazerGuiApp {
                             self.on_device_attached();
                             self.set_status_message("Initializing...".to_string());
                         }
+                        self.try_attach_cooling_pad();
                     }
                 }
                 InitMessage::SystemSpecsComplete(specs) => {
@@ -697,6 +938,7 @@ impl RazerGuiApp {
                             self.set_error_message(format!("Failed to read device status: {}", e));
                         }
                     }
+                    self.try_attach_cooling_pad();
                 }
             }
         }
@@ -824,8 +1066,33 @@ impl RazerGuiApp {
             debug_enabled: self.status_messages,
             minimize_to_tray: self.minimize_to_tray,
             run_at_startup: self.run_at_startup,
+            cooling_pad: config::CoolingPadConfig {
+                fan_mode: self.cooling_pad_fan_mode.as_str().to_string(),
+                fan_on: false,
+                manual_rpm: self.cooling_pad_manual_rpm,
+                auto_min_rpm: self.cooling_pad_auto_min_rpm,
+                auto_max_rpm: self.cooling_pad_auto_max_rpm,
+                auto_off_below_c: self.cooling_pad_auto_off_below_c,
+                auto_full_above_c: self.cooling_pad_auto_full_above_c,
+                auto_turn_on_delay_secs: self.cooling_pad_auto_turn_on_delay_secs,
+                auto_turn_off_delay_secs: self.cooling_pad_auto_turn_off_delay_secs,
+                auto_temp_ema_alpha: self.cooling_pad_auto_temp_ema_alpha,
+                auto_rpm_slew_up_per_sec: self.cooling_pad_auto_rpm_slew_up_per_sec,
+                auto_rpm_slew_down_per_sec: self.cooling_pad_auto_rpm_slew_down_per_sec,
+                auto_follow_temp_margin_c: self.cooling_pad_auto_follow_temp_margin_c,
+                auto_temp_hysteresis_c: self.cooling_pad_auto_temp_hysteresis_c,
+                lighting_mode: self.cooling_pad_lighting_mode.clone(),
+                color: self.cooling_pad_color,
+                brightness_step: self.cooling_pad_brightness_step,
+            },
         };
         config.save()
+    }
+
+    fn save_cooling_pad_config(&mut self) {
+        if let Err(e) = self.persist_config() {
+            self.set_error_message(format!("Failed to save cooling pad settings: {e}"));
+        }
     }
 
     fn save_current_as_ac_profile(&mut self) {
@@ -1188,6 +1455,72 @@ impl RazerGuiApp {
         }
     }
 
+    fn enforce_cooling_pad_fan_rpm(&mut self) {
+        if self.cooling_pad.is_none() {
+            return;
+        }
+        match self.cooling_pad_fan_mode {
+            CoolingPadFanMode::Off => {}
+            CoolingPadFanMode::Manual => self.apply_cooling_pad_manual_fan(self.cooling_pad_manual_rpm),
+            CoolingPadFanMode::Auto => {
+                let output = self.compute_cooling_pad_auto_output();
+                self.apply_cooling_pad_auto_output(output);
+            }
+        }
+    }
+
+    fn apply_cooling_pad_manual_fan(&mut self, rpm: u16) {
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        match pad.with(|p| p.set_fan_rpm(rpm)) {
+            Some(Ok(())) => {
+                self.last_cooling_pad_fan_enforce_time = std::time::Instant::now();
+            }
+            Some(Err(_)) | None => {
+                self.schedule_cooling_pad_redetect();
+            }
+        }
+    }
+
+    fn apply_cooling_pad_auto_output(&mut self, output: CoolingPadAutoOutput) {
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        let result = match output {
+            CoolingPadAutoOutput::Off => pad.with(|p| p.fan_off()),
+            CoolingPadAutoOutput::Rpm(rpm) => pad.with(|p| p.set_fan_rpm(rpm)),
+        };
+        match result {
+            Some(Ok(())) => {
+                self.last_cooling_pad_fan_enforce_time = std::time::Instant::now();
+            }
+            Some(Err(_)) | None => {
+                self.schedule_cooling_pad_redetect();
+            }
+        }
+    }
+
+    fn apply_cooling_pad_fan_to_device(&mut self) {
+        match self.cooling_pad_fan_mode {
+            CoolingPadFanMode::Off => {
+                if let Some(pad) = self.cooling_pad.as_ref() {
+                    let _ = pad.with(|p| p.fan_off());
+                }
+                self.cooling_pad_auto_state = CoolingPadAutoState::default();
+            }
+            CoolingPadFanMode::Manual => {
+                self.cooling_pad_auto_state = CoolingPadAutoState::default();
+                self.apply_cooling_pad_manual_fan(self.cooling_pad_manual_rpm);
+            }
+            CoolingPadFanMode::Auto => {
+                let output = self.compute_cooling_pad_auto_output();
+                self.apply_cooling_pad_auto_output(output);
+            }
+        }
+        self.last_cooling_pad_fan_enforce_time = std::time::Instant::now();
+    }
+
     fn run_fan_enforcement(&mut self) {
         if self.fully_initialized && self.device.is_some() && !self.loading {
             self.reconcile_auto_fan_cap_state();
@@ -1195,6 +1528,13 @@ impl RazerGuiApp {
             if self.last_fan_enforce_time.elapsed().as_secs_f32() >= 1.0 {
                 self.enforce_manual_fan_rpm();
             }
+        }
+        if self.fully_initialized
+            && self.cooling_pad.is_some()
+            && self.cooling_pad_fan_mode != CoolingPadFanMode::Off
+            && self.last_cooling_pad_fan_enforce_time.elapsed().as_secs_f32() >= 1.0
+        {
+            self.enforce_cooling_pad_fan_rpm();
         }
     }
 
@@ -1452,6 +1792,9 @@ impl RazerGuiApp {
         let Some(tab) = action.selected_tab else {
             return;
         };
+        if tab == AppTab::CoolingPad && self.cooling_pad.is_none() {
+            return;
+        }
         if tab == AppTab::Info && self.active_tab != AppTab::Info {
             self.last_razer_devices_refresh = std::time::Instant::now()
                 - std::time::Duration::from_secs(INFO_DEVICES_REFRESH_SECS as u64);
@@ -1503,6 +1846,259 @@ impl RazerGuiApp {
         if action.lights_always_on {
             self.toggle_lights_always_on();
         }
+    }
+
+    fn render_cooling_pad_fan_section(&mut self, ui: &mut egui::Ui) {
+        use ui::cooling_pad_fan::{render_cooling_pad_fan_section, CoolingPadFanAction};
+
+        let action = render_cooling_pad_fan_section(
+            ui,
+            self.cooling_pad_fan_mode,
+            self.cooling_pad_display_rpm(),
+            &mut self.cooling_pad_manual_rpm,
+            &mut self.cooling_pad_auto_min_rpm,
+            &mut self.cooling_pad_auto_max_rpm,
+            &mut self.cooling_pad_auto_off_below_c,
+            &mut self.cooling_pad_auto_full_above_c,
+        );
+
+        match action {
+            CoolingPadFanAction::None => {}
+            CoolingPadFanAction::SetMode(mode) => {
+                self.set_cooling_pad_fan_mode(mode);
+            }
+            CoolingPadFanAction::SetManualRpm(rpm) | CoolingPadFanAction::ManualRpmDragging(rpm) => {
+                self.cooling_pad_manual_rpm = rpm;
+                if matches!(action, CoolingPadFanAction::SetManualRpm(_))
+                    && self.cooling_pad_fan_mode == CoolingPadFanMode::Manual
+                {
+                    self.apply_cooling_pad_manual_fan(rpm);
+                    self.save_cooling_pad_config();
+                    self.set_optional_status_message(format!("Cooling pad fan set to {rpm} RPM"));
+                }
+            }
+            CoolingPadFanAction::SetAutoMinRpm(min) => {
+                self.cooling_pad_auto_min_rpm = min.min(self.cooling_pad_auto_max_rpm);
+                self.cooling_pad_auto_state = CoolingPadAutoState::default();
+                if self.cooling_pad_fan_mode == CoolingPadFanMode::Auto {
+                    self.apply_cooling_pad_fan_to_device();
+                }
+                self.save_cooling_pad_config();
+            }
+            CoolingPadFanAction::SetAutoMaxRpm(max) => {
+                self.cooling_pad_auto_max_rpm = max.max(self.cooling_pad_auto_min_rpm);
+                self.cooling_pad_auto_state = CoolingPadAutoState::default();
+                if self.cooling_pad_fan_mode == CoolingPadFanMode::Auto {
+                    self.apply_cooling_pad_fan_to_device();
+                }
+                self.save_cooling_pad_config();
+            }
+            CoolingPadFanAction::SetAutoOffBelowC(off) => {
+                self.cooling_pad_auto_off_below_c = off;
+                if self.cooling_pad_auto_full_above_c < off + 5.0 {
+                    self.cooling_pad_auto_full_above_c = off + 5.0;
+                }
+                self.cooling_pad_auto_state = CoolingPadAutoState::default();
+                if self.cooling_pad_fan_mode == CoolingPadFanMode::Auto {
+                    self.apply_cooling_pad_fan_to_device();
+                }
+                self.save_cooling_pad_config();
+            }
+            CoolingPadFanAction::SetAutoFullAboveC(full) => {
+                self.cooling_pad_auto_full_above_c = full;
+                self.cooling_pad_auto_state = CoolingPadAutoState::default();
+                if self.cooling_pad_fan_mode == CoolingPadFanMode::Auto {
+                    self.apply_cooling_pad_fan_to_device();
+                }
+                self.save_cooling_pad_config();
+            }
+        }
+    }
+
+    fn set_cooling_pad_fan_mode(&mut self, mode: CoolingPadFanMode) {
+        if self.cooling_pad.is_none() {
+            return;
+        }
+        self.cooling_pad_fan_mode = mode;
+        self.cooling_pad_auto_state = CoolingPadAutoState::default();
+        self.apply_cooling_pad_fan_to_device();
+        let label = match mode {
+            CoolingPadFanMode::Off => "Cooling pad fan turned off",
+            CoolingPadFanMode::Manual => "Cooling pad fan set to manual",
+            CoolingPadFanMode::Auto => "Cooling pad fan set to auto",
+        };
+        self.set_optional_status_message(label.into());
+        self.save_cooling_pad_config();
+    }
+
+    fn render_cooling_pad_lighting_section(&mut self, ui: &mut egui::Ui) {
+        use ui::cooling_pad_lighting::render_cooling_pad_lighting_section;
+
+        let action = render_cooling_pad_lighting_section(
+            ui,
+            &self.cooling_pad_lighting_mode,
+            &mut self.cooling_pad_brightness_step,
+            &mut self.cooling_pad_color,
+        );
+
+        if let Some(active) = action.slider_active {
+            self.cooling_pad_brightness_slider_active = active;
+        }
+
+        if let Some(mode) = action.mode {
+            self.set_cooling_pad_lighting_mode(&mode);
+        }
+
+        if action.apply_color {
+            self.apply_cooling_pad_lighting_color();
+        }
+
+        if let Some(brightness) = action.brightness {
+            self.set_cooling_pad_brightness(brightness);
+        }
+    }
+
+    fn cooling_pad_rgb(&self) -> Rgb {
+        Rgb {
+            r: self.cooling_pad_color[0],
+            g: self.cooling_pad_color[1],
+            b: self.cooling_pad_color[2],
+        }
+    }
+
+    fn apply_cooling_pad_config_to_device(&mut self) {
+        if self.cooling_pad.is_none() {
+            return;
+        }
+
+        self.apply_cooling_pad_fan_to_device();
+
+        if !self.cooling_pad_chroma_available {
+            self.set_optional_status_message("Cooling pad settings restored".into());
+            return;
+        }
+
+        let Some(pad_mode) = PadLightingMode::from_str(&self.cooling_pad_lighting_mode) else {
+            return;
+        };
+        let rgb = self.cooling_pad_rgb();
+        let brightness = ui::lighting::BRIGHTNESS_LEVELS[self.cooling_pad_brightness_step];
+
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        let lighting_result = if pad_mode == PadLightingMode::Off {
+            pad.with(|p| p.apply_lighting(pad_mode, rgb, brightness, false))
+        } else {
+            pad.with(|p| p.apply_color_change(pad_mode, rgb, brightness))
+        };
+
+        match lighting_result {
+            Some(Ok(())) => {
+                self.mark_cooling_pad_lighting_changed();
+                self.set_optional_status_message("Cooling pad settings restored".into());
+            }
+            Some(Err(e)) => {
+                self.set_error_message(format!("Failed to restore cooling pad lighting: {e}"));
+            }
+            None => {}
+        }
+    }
+
+    fn apply_cooling_pad_lighting(&mut self, clear_first: bool) {
+        let Some(pad_mode) = PadLightingMode::from_str(&self.cooling_pad_lighting_mode) else {
+            return;
+        };
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        let rgb = self.cooling_pad_rgb();
+        let brightness = ui::lighting::BRIGHTNESS_LEVELS[self.cooling_pad_brightness_step];
+
+        match pad.with(|p| p.apply_lighting(pad_mode, rgb, brightness, clear_first)) {
+            Some(Ok(())) => {
+                self.mark_cooling_pad_lighting_changed();
+                self.save_cooling_pad_config();
+                self.set_optional_status_message(format!(
+                    "Cooling pad lighting: {}",
+                    self.cooling_pad_lighting_mode
+                ));
+            }
+            Some(Err(e)) => {
+                self.set_error_message(format!("Failed to set cooling pad lighting: {e}"));
+            }
+            None => {
+                self.set_error_message("Failed to set cooling pad lighting: device busy".into());
+            }
+        }
+    }
+
+    fn set_cooling_pad_lighting_mode(&mut self, mode: &str) {
+        if PadLightingMode::from_str(mode).is_none() {
+            return;
+        }
+        self.cooling_pad_lighting_mode = mode.to_string();
+        self.apply_cooling_pad_lighting(true);
+    }
+
+    fn apply_cooling_pad_lighting_color(&mut self) {
+        if self.cooling_pad_lighting_mode == "Off" {
+            return;
+        }
+        let Some(pad_mode) = PadLightingMode::from_str(&self.cooling_pad_lighting_mode) else {
+            return;
+        };
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        let rgb = self.cooling_pad_rgb();
+        let brightness = ui::lighting::BRIGHTNESS_LEVELS[self.cooling_pad_brightness_step];
+
+        match pad.with(|p| p.apply_color_change(pad_mode, rgb, brightness)) {
+            Some(Ok(())) => {
+                self.mark_cooling_pad_lighting_changed();
+                self.save_cooling_pad_config();
+                self.set_optional_status_message("Cooling pad color applied".into());
+            }
+            Some(Err(e)) => {
+                self.set_error_message(format!("Failed to set cooling pad color: {e}"));
+            }
+            None => {
+                self.set_error_message("Failed to set cooling pad color: device busy".into());
+            }
+        }
+    }
+
+    fn set_cooling_pad_brightness(&mut self, brightness: u8) {
+        let Some(pad) = self.cooling_pad.as_ref() else {
+            return;
+        };
+        if self.cooling_pad_lighting_mode == "Off" {
+            return;
+        }
+
+        match pad.with(|p| p.set_brightness(brightness)) {
+            Some(Ok(())) => {
+                self.mark_cooling_pad_lighting_changed();
+                self.save_cooling_pad_config();
+                self.set_optional_status_message(format!("Cooling pad brightness set to {brightness}"));
+            }
+            Some(Err(e)) => {
+                self.set_error_message(format!("Failed to set cooling pad brightness: {e}"));
+            }
+            None => {
+                self.set_error_message("Failed to set cooling pad brightness: device busy".into());
+            }
+        }
+    }
+
+    fn build_cooling_pad_info(&self) -> Option<CoolingPadInfoView> {
+        self.cooling_pad.as_ref().map(|_| CoolingPadInfoView {
+            fan_mode: self.cooling_pad_fan_mode.as_str().to_string(),
+            commanded_rpm: self.cooling_pad_display_rpm(),
+            lighting_mode: self.cooling_pad_lighting_mode.clone(),
+            chroma_available: self.cooling_pad_chroma_available,
+        })
     }
 
     fn set_battery_care(&mut self, level: BatteryCare) {
@@ -1563,7 +2159,9 @@ impl RazerGuiApp {
         self.poll_slow.store(true, Ordering::Relaxed);
         self.process_background_initialization();
         self.process_poll_snapshots(ctx);
+        self.process_cooling_pad_poll_snapshots(ctx);
         self.process_thermal_snapshots(ctx);
+        self.try_detect_cooling_pad_hotplug();
         self.run_fan_enforcement();
     }
 }
@@ -1580,6 +2178,7 @@ impl eframe::App for RazerGuiApp {
 
         let fast_repaint = !self.fully_initialized
             || self.brightness_slider_active
+            || self.cooling_pad_brightness_slider_active
             || self.auto_fan_max_rpm_editing;
         let repaint_interval = if fast_repaint {
             std::time::Duration::from_millis(100)
@@ -1596,7 +2195,17 @@ impl eframe::App for RazerGuiApp {
         self.poll_slow
             .store(minimized || !self.is_window_visible(), Ordering::Relaxed);
         self.process_poll_snapshots(ctx);
+        self.process_cooling_pad_poll_snapshots(ctx);
         self.process_thermal_snapshots(ctx);
+        self.cooling_pad_poll_brightness_skip.store(
+            self.cooling_pad_brightness_slider_active,
+            Ordering::Relaxed,
+        );
+        self.try_detect_cooling_pad_hotplug();
+
+        if self.active_tab == AppTab::CoolingPad && self.cooling_pad.is_none() {
+            self.active_tab = AppTab::Laptop;
+        }
 
         self.message_manager.update();
 
@@ -1611,6 +2220,7 @@ impl eframe::App for RazerGuiApp {
 
         // Handle quit
         if self.should_quit {
+            self.shutdown_cooling_pad();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -1672,6 +2282,7 @@ impl eframe::App for RazerGuiApp {
                 self.detecting_device,
                 self.fully_initialized,
                 self.active_tab,
+                self.cooling_pad.is_some(),
             );
             self.apply_tab_action(tab_action);
             ui.separator();
@@ -1682,32 +2293,76 @@ impl eframe::App for RazerGuiApp {
             }
 
             match self.active_tab {
-                AppTab::Control if self.fully_initialized => {
-                    self.render_performance_section(ui);
-                    ui.separator();
+                AppTab::Laptop if self.fully_initialized => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("laptop_tab")
+                        .show(ui, |ui| {
+                            self.render_performance_section(ui);
+                            ui.separator();
 
-                    self.render_fan_section(ui);
-                    ui.separator();
+                            self.render_fan_section(ui);
+                            ui.separator();
 
-                    self.render_lighting_section(ui);
-                    ui.separator();
+                            self.render_lighting_section(ui);
+                            ui.separator();
 
-                    self.render_battery_section(ui);
-                    ui.separator();
+                            self.render_battery_section(ui);
+                            ui.separator();
 
-                    self.render_profiles_section(ui);
-                    ui.add_space(16.0);
+                            self.render_profiles_section(ui);
+                            ui.add_space(16.0);
+                        });
                 }
-                AppTab::Control => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(24.0);
-                        ui.spinner();
-                        ui.label("Loading controls…");
-                    });
+                AppTab::Laptop => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("laptop_tab_loading")
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(24.0);
+                                ui.spinner();
+                                ui.label("Loading laptop controls…");
+                            });
+                        });
+                }
+                AppTab::CoolingPad if self.fully_initialized && self.cooling_pad.is_some() => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("cooling_pad_tab")
+                        .show(ui, |ui| {
+                            ui.group(|ui| {
+                                ui.add(egui::Label::new("🌡 Temperature").selectable(false));
+                                ui.separator();
+                                ui::temp::render_temp_pair(
+                                    ui,
+                                    self.thermal.cpu_avg_c,
+                                    self.thermal.gpu_avg_c,
+                                );
+                            });
+                            ui.add_space(4.0);
+                            self.render_cooling_pad_fan_section(ui);
+                            ui.separator();
+
+                            if self.cooling_pad_chroma_available {
+                                self.render_cooling_pad_lighting_section(ui);
+                            } else {
+                                ui.label("Lighting control is unavailable on this connection.");
+                            }
+                        });
+                }
+                AppTab::CoolingPad => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("cooling_pad_tab_loading")
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(24.0);
+                                ui.spinner();
+                                ui.label("Loading…");
+                            });
+                        });
                 }
                 AppTab::Info => {
                     let laptop_info = self.build_laptop_info();
-                    render_info_tab(ui, &laptop_info, &self.razer_devices);
+                    let cooling_pad_info = self.build_cooling_pad_info();
+                    render_info_tab(ui, &laptop_info, cooling_pad_info.as_ref(), &self.razer_devices);
                 }
             }
         });
@@ -1811,6 +2466,7 @@ fn main() -> Result<(), eframe::Error> {
             let tray_state = tray::TraySharedState::new(cc.egui_ctx.clone());
             if let Some(hwnd) = tray::hwnd_from_window_handle(cc) {
                 tray_state.set_hwnd(hwnd);
+                tray::set_windows_taskbar_icon(hwnd);
             }
             let tray_guard = tray::TrayHandle::init(tray_icon, Arc::clone(&tray_state));
             let mut app = RazerGuiApp::new();

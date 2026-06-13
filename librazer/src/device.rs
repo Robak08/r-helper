@@ -4,7 +4,7 @@ use crate::packet::Packet;
 use crate::profile::{lookup_profile, resolve_generation};
 
 use anyhow::{anyhow, Context, Result};
-use std::{thread, time};
+use std::{thread, time::Duration};
 
 pub struct Device {
     device: hidapi::HidDevice,
@@ -88,7 +88,7 @@ impl Device {
         const MAX_RETRIES: usize = 5;
 
         for attempt in 0..MAX_RETRIES {
-            thread::sleep(time::Duration::from_micros(1000));
+            thread::sleep(Duration::from_micros(1000));
 
             self.device
                 .send_feature_report(
@@ -101,7 +101,7 @@ impl Device {
                 )
                 .context("Failed to send feature report")?;
 
-            thread::sleep(time::Duration::from_micros(2000));
+            thread::sleep(Duration::from_micros(2000));
 
             let response_size = self.device.get_feature_report(&mut response_buf)?;
             if response_buf.len() != response_size {
@@ -116,7 +116,7 @@ impl Device {
                 return Err(anyhow!("Failed to match report after {} attempts", MAX_RETRIES));
             }
 
-            thread::sleep(time::Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(500));
         }
 
         Err(anyhow!("Failed to send feature report"))

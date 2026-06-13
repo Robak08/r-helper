@@ -1,6 +1,8 @@
 // UI modules
 
 pub mod battery;
+pub mod cooling_pad_fan;
+pub mod cooling_pad_lighting;
 pub mod fan;
 pub mod footer;
 pub mod header;

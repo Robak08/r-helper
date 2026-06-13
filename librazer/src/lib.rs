@@ -1,5 +1,6 @@
 pub mod chroma;
 pub mod command;
+pub mod cooling_pad;
 pub mod device;
 pub mod enumerate;
 pub mod feature;

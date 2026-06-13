@@ -15,6 +15,9 @@ A Windows application to control Razer Blade settings w/o Synapse.
 - Keyboard backlight brightness control
 - Logo lighting: Static, Breathing, Off
 - Battery care: Toggle charging threshold (80%)
+- **Razer Laptop Cooling Pad** (USB `1532:0F43`): fan on/off with RPM control (500–3200), underglow lighting (Off / Static / Breathing + brightness)
+
+> **Cooling pad note:** Close Razer Synapse or set the pad to Manual there before using r-helper — both apps control the pad over USB HID and will conflict otherwise. The pad has no real RPM sensor; displayed RPM is the last commanded value.
 
 
 ## Installation

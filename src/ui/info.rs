@@ -8,6 +8,14 @@ const COMPACT_PROGRESS_WIDTH: f32 = 48.0;
 const COMPACT_PROGRESS_HEIGHT: f32 = 12.0;
 const PROGRESS_BAR_RADIUS: u8 = 2;
 
+#[derive(Debug, Clone)]
+pub struct CoolingPadInfoView {
+    pub fan_mode: String,
+    pub commanded_rpm: Option<u16>,
+    pub lighting_mode: String,
+    pub chroma_available: bool,
+}
+
 /// Data assembled on the app side for the Info tab laptop card.
 #[derive(Debug, Clone)]
 pub struct LaptopInfoView {
@@ -49,6 +57,7 @@ impl Default for LaptopInfoView {
 pub fn render_info_tab(
     ui: &mut egui::Ui,
     info: &LaptopInfoView,
+    cooling_pad: Option<&CoolingPadInfoView>,
     razer_devices: &[RazerDeviceSummary],
 ) {
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -114,7 +123,39 @@ pub fn render_info_tab(
 
         ui.add_space(8.0);
 
+        if let Some(pad) = cooling_pad {
+            render_cooling_pad_info(ui, pad);
+            ui.add_space(8.0);
+        }
+
         render_razer_devices(ui, razer_devices);
+    });
+}
+
+fn render_cooling_pad_info(ui: &mut egui::Ui, pad: &CoolingPadInfoView) {
+    ui.group(|ui| {
+        ui.label(RichText::new("🌀 Cooling pad").strong());
+        ui.separator();
+        info_row(ui, "Model", "Razer Laptop Cooling Pad");
+        info_row(ui, "USB PID", "0x0f43");
+        let fan_label = match pad.fan_mode.as_str() {
+            "manual" => "Manual",
+            "auto" => "Auto",
+            _ => "Off",
+        };
+        info_row(ui, "Fan", fan_label);
+        match pad.commanded_rpm {
+            Some(rpm) => info_row(ui, "Set RPM", &format!("{rpm}")),
+            None if pad.fan_mode == "auto" => {
+                info_row(ui, "Set RPM", "Off (auto)");
+            }
+            None => {}
+        }
+        if pad.chroma_available {
+            info_row(ui, "Lighting", &pad.lighting_mode);
+        } else {
+            info_row(ui, "Lighting", "Unavailable");
+        }
     });
 }
 

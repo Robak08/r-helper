@@ -177,10 +177,19 @@ pub fn get_logo_mode(device: &Device) -> Result<LogoMode> {
 }
 
 pub fn set_logo_mode(device: &Device, mode: LogoMode) -> Result<()> {
-    if mode != LogoMode::Off {
-        _set_logo_mode(device, mode)?;
+    match mode {
+        LogoMode::Off => {
+            _set_logo_power(device, LogoMode::Off)?;
+        }
+        LogoMode::Static => {
+            _set_logo_mode(device, LogoMode::Static)?;
+            _set_logo_power(device, LogoMode::Static)?;
+        }
+        LogoMode::Breathing => {
+            _set_logo_mode(device, LogoMode::Breathing)?;
+            _set_logo_power(device, LogoMode::Breathing)?;
+        }
     }
-    _set_logo_power(device, mode)?;
     Ok(())
 }
 

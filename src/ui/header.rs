@@ -8,7 +8,8 @@ const FULL_ALPHA: u8 = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
-    Control,
+    Laptop,
+    CoolingPad,
     Info,
 }
 
@@ -28,6 +29,7 @@ pub fn render_header(
     detecting_device: bool,
     fully_initialized: bool,
     active_tab: AppTab,
+    show_cooling_pad_tab: bool,
 ) -> TabBarAction {
     let mut tab_action = TabBarAction::default();
 
@@ -36,7 +38,7 @@ pub fn render_header(
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if fully_initialized {
-                tab_action = render_tab_bar(ui, active_tab);
+                tab_action = render_tab_bar(ui, active_tab, show_cooling_pad_tab);
             } else {
                 render_init_status(ui, ctx, device_connected, detecting_device);
             }
@@ -50,15 +52,22 @@ pub fn render_header(
     tab_action
 }
 
-fn render_tab_bar(ui: &mut egui::Ui, active_tab: AppTab) -> TabBarAction {
+fn render_tab_bar(ui: &mut egui::Ui, active_tab: AppTab, show_cooling_pad_tab: bool) -> TabBarAction {
     let mut action = TabBarAction::default();
 
     ui.horizontal(|ui| {
+        if ui.selectable_label(active_tab == AppTab::Laptop, "Laptop").clicked() {
+            action.selected_tab = Some(AppTab::Laptop);
+        }
+        if show_cooling_pad_tab
+            && ui
+                .selectable_label(active_tab == AppTab::CoolingPad, "Cooling Pad")
+                .clicked()
+        {
+            action.selected_tab = Some(AppTab::CoolingPad);
+        }
         if ui.selectable_label(active_tab == AppTab::Info, "Info").clicked() {
             action.selected_tab = Some(AppTab::Info);
-        }
-        if ui.selectable_label(active_tab == AppTab::Control, "Control").clicked() {
-            action.selected_tab = Some(AppTab::Control);
         }
     });
 

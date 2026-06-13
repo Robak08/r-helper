@@ -1,14 +1,22 @@
 
+# Razer Laptop Cooling Pad (v0.5.1)
+## Features
+
+- **Cooling pad fan** — On/Off toggle and manual RPM slider (500–3200, 50 RPM steps) via direct HID control.
+- **Cooling pad lighting** — Underglow Off / Static / Breathing with brightness steps (Chroma extended matrix).
+- **Hot-plug detection** — Pad sections appear when USB `1532:0F43` is connected; fan turns off on app exit.
+- **Info tab** — Cooling pad status card when connected.
+
+## Notes
+
+- Do not run alongside Razer Synapse unless the pad is in Manual mode in Synapse.
+- Displayed pad RPM is commanded speed, not a measured value.
+
 # CPU/GPU average temperatures (v0.5.0)
 ## Features
 
 - **CPU/GPU average temps** — Shown in the Info tab laptop card and bottom-right of Fan Control.
 - **Thermal polling** — Background thread reads LibreHardwareMonitor WMI when available, with NVIDIA NVML and ACPI fallbacks.
-
-## Fixes
-
-- **CPU temp fallback** — Uses Windows thermal performance counters when LHM is not running (ACPI WMI often requires admin).
-- **CPU temp accuracy** — Reads Package/hottest core via LHM, or the primary ACPI `\_TZ` zone instead of averaging cooler EC zones.
 
 # Startup & Control tab performance (v0.4.9)
 ## Fixes

@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32, RichText};
 
-const COOL_MAX_C: f32 = 60.0;
-const WARM_MAX_C: f32 = 80.0;
+const COOL_MAX_C: f32 = 68.0;
+const WARM_MAX_C: f32 = 82.0;
 
 pub fn format_temp_c(value: Option<f32>) -> String {
     match value {
@@ -31,6 +31,14 @@ pub fn temp_rich_text(prefix: &str, value: Option<f32>) -> RichText {
 }
 
 const DARK_GREEN_MAX: u8 = 120;
+
+pub fn render_temp_pair(ui: &mut egui::Ui, cpu_temp_c: Option<f32>, gpu_temp_c: Option<f32>) {
+    ui.horizontal(|ui| {
+        ui.add(egui::Label::new(temp_rich_text("CPU", cpu_temp_c)).selectable(false));
+        ui.add_space(12.0);
+        ui.add(egui::Label::new(temp_rich_text("GPU", gpu_temp_c)).selectable(false));
+    });
+}
 
 pub fn info_temp_row(ui: &mut egui::Ui, label: &str, value: Option<f32>) {
     ui.horizontal(|ui| {

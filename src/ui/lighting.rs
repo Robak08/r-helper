@@ -1,8 +1,7 @@
 use eframe::egui;
 
-// Discrete brightness levels that the keyboard actually supports
-// Based on testing with Fn+F10/F11 brightness keys
-const BRIGHTNESS_LEVELS: &[u8] = &[
+// Discrete brightness levels supported by Razer lighting controls.
+pub const BRIGHTNESS_LEVELS: &[u8] = &[
     0,   // Step 0
     13,  // Step 1
     28,  // Step 2
@@ -36,7 +35,12 @@ pub struct LightingAction {
 
 impl Default for LightingAction {
     fn default() -> Self {
-        Self { logo_mode: None, brightness: None, lights_always_on: false, slider_active: None }
+        Self {
+            logo_mode: None,
+            brightness: None,
+            lights_always_on: false,
+            slider_active: None,
+        }
     }
 }
 
