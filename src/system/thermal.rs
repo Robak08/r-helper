@@ -1,9 +1,30 @@
 use serde::Deserialize;
 
+/// Ignore single-sample CPU/GPU jumps larger than this above the last value (WMI glitches).
+pub const DEFAULT_TEMP_SPIKE_REJECT_C: f32 = 12.0;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThermalSnapshot {
     pub cpu_avg_c: Option<f32>,
     pub gpu_avg_c: Option<f32>,
+}
+
+pub fn filter_temp_spike(
+    prev: Option<f32>,
+    sample: Option<f32>,
+    max_upward_jump_c: f32,
+) -> Option<f32> {
+    match (prev, sample) {
+        (Some(p), Some(s)) if s > p + max_upward_jump_c => Some(p),
+        (_, sample) => sample,
+    }
+}
+
+pub fn filter_thermal_snapshot_spike(prev: &ThermalSnapshot, new: ThermalSnapshot) -> ThermalSnapshot {
+    ThermalSnapshot {
+        cpu_avg_c: filter_temp_spike(prev.cpu_avg_c, new.cpu_avg_c, DEFAULT_TEMP_SPIKE_REJECT_C),
+        gpu_avg_c: filter_temp_spike(prev.gpu_avg_c, new.gpu_avg_c, DEFAULT_TEMP_SPIKE_REJECT_C),
+    }
 }
 
 #[cfg(target_os = "windows")]

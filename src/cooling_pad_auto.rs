@@ -22,6 +22,10 @@ pub const DEFAULT_RPM_SLEW_DOWN_PER_SEC: u16 = 250;
 pub const DEFAULT_FOLLOW_TEMP_MARGIN_C: f32 = 10.0;
 /// Temperature hysteresis when deciding whether the fan should turn off.
 pub const DEFAULT_TEMP_HYSTERESIS_C: f32 = 3.0;
+/// Reject upward EMA steps larger than this (°C) — blocks false hot spikes from driving RPM.
+pub const DEFAULT_TEMP_SPIKE_REJECT_C: f32 = 12.0;
+/// When the filtered reading is this much below smoothed, trust it immediately (stuck-high recovery).
+pub const DEFAULT_TEMP_FAST_COOL_C: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoolingPadAutoOutput {
@@ -34,6 +38,8 @@ pub struct CoolingPadAutoInputs {
     pub cpu_temp_c: Option<f32>,
     pub gpu_temp_c: Option<f32>,
     pub laptop_fan_actual_rpm: Option<u16>,
+    /// When set, laptop fan follow uses `min(actual, cap)` so pad auto respects laptop auto max.
+    pub laptop_fan_cap_rpm: Option<u16>,
     pub min_rpm: u16,
     pub max_rpm: u16,
     pub off_below_c: f32,
@@ -48,6 +54,8 @@ pub struct CoolingPadAutoInputs {
     pub rpm_slew_up_per_sec: u16,
     pub rpm_slew_down_per_sec: u16,
     pub follow_temp_margin_c: f32,
+    /// When false, pad auto ignores laptop fan speed (user manual laptop fan, etc.).
+    pub laptop_fan_follow_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -71,16 +79,30 @@ pub fn compute_combined_auto(
     let dt = inputs.dt_secs.max(0.05);
     let alpha = inputs.temp_ema_alpha.clamp(0.05, 1.0);
 
-    state.smoothed_cpu_c = ema_update(state.smoothed_cpu_c, inputs.cpu_temp_c, alpha);
-    state.smoothed_gpu_c = ema_update(state.smoothed_gpu_c, inputs.gpu_temp_c, alpha);
+    let spike_reject = DEFAULT_TEMP_SPIKE_REJECT_C;
+    let cpu_sample = reconcile_cooler_sample(state.smoothed_cpu_c, inputs.cpu_temp_c);
+    let gpu_sample = reconcile_cooler_sample(state.smoothed_gpu_c, inputs.gpu_temp_c);
+    state.smoothed_cpu_c =
+        ema_update_temp(state.smoothed_cpu_c, cpu_sample, alpha, spike_reject);
+    state.smoothed_gpu_c =
+        ema_update_temp(state.smoothed_gpu_c, gpu_sample, alpha, spike_reject);
+    let laptop_sample = if inputs.laptop_fan_follow_enabled {
+        inputs.laptop_fan_actual_rpm.map(|rpm| match inputs.laptop_fan_cap_rpm {
+            Some(cap) => rpm.min(cap),
+            None => rpm,
+        })
+    } else {
+        None
+    };
     state.smoothed_laptop_rpm = ema_update(
         state.smoothed_laptop_rpm,
-        inputs.laptop_fan_actual_rpm.map(|r| r as f32),
+        laptop_sample.map(|r| r as f32),
         alpha,
     );
 
     let min_rpm = round_rpm(inputs.min_rpm.clamp(MIN_RPM, MAX_RPM));
     let max_rpm = round_rpm(inputs.max_rpm.clamp(min_rpm, MAX_RPM));
+    clamp_auto_state_to_limits(state, min_rpm, max_rpm);
     let off_below = inputs.off_below_c;
     let full_above = inputs.full_above_c.max(off_below + 1.0);
     let temp_hyst = inputs.temp_hysteresis_c.max(0.0);
@@ -141,7 +163,7 @@ pub fn compute_combined_auto(
         state.overcool_secs_left = inputs.overcool_hold_secs.max(0.0);
     }
 
-    target = apply_overcool_hold(state, target, dt);
+    target = apply_overcool_hold(state, target, dt, min_rpm, max_rpm);
 
     let up_step = slew_step(inputs.rpm_slew_up_per_sec, dt);
     let down_step = slew_step(inputs.rpm_slew_down_per_sec, dt);
@@ -150,6 +172,8 @@ pub fn compute_combined_auto(
         Some(current) => round_rpm(slew_toward(current, target, up_step, down_step)),
         None => min_rpm.min(target),
     };
+
+    let applied = round_rpm(applied.clamp(min_rpm, max_rpm));
 
     state.fan_running = true;
     state.last_rpm = Some(applied);
@@ -163,12 +187,27 @@ fn reset_running_state(state: &mut CoolingPadAutoState) {
     state.cool_dwell_secs = 0.0;
     state.overcool_hold_rpm = None;
     state.overcool_secs_left = 0.0;
+    state.smoothed_laptop_rpm = None;
 }
 
-fn apply_overcool_hold(state: &mut CoolingPadAutoState, target: u16, dt: f32) -> u16 {
-    let Some(hold) = state.overcool_hold_rpm else {
+/// Clear laptop-follow smoothing after the user takes manual control of the laptop fan.
+pub fn clear_laptop_follow_smoothing(state: &mut CoolingPadAutoState) {
+    state.smoothed_laptop_rpm = None;
+}
+
+fn apply_overcool_hold(
+    state: &mut CoolingPadAutoState,
+    target: u16,
+    dt: f32,
+    min_rpm: u16,
+    max_rpm: u16,
+) -> u16 {
+    let target = round_rpm(target.clamp(min_rpm, max_rpm));
+    let Some(mut hold) = state.overcool_hold_rpm else {
         return target;
     };
+    hold = round_rpm(hold.clamp(min_rpm, max_rpm));
+    state.overcool_hold_rpm = Some(hold);
 
     if target >= hold {
         return target;
@@ -183,8 +222,45 @@ fn apply_overcool_hold(state: &mut CoolingPadAutoState, target: u16, dt: f32) ->
     target
 }
 
+/// Re-clamp persisted RPM when min/max limits change (e.g. user lowers max in the UI).
+pub fn clamp_auto_state_to_limits(state: &mut CoolingPadAutoState, min_rpm: u16, max_rpm: u16) {
+    if let Some(hold) = state.overcool_hold_rpm {
+        let clamped = round_rpm(hold.clamp(min_rpm, max_rpm));
+        if clamped < hold {
+            state.overcool_hold_rpm = Some(clamped);
+            state.overcool_secs_left = 0.0;
+        } else {
+            state.overcool_hold_rpm = Some(clamped);
+        }
+    }
+    if let Some(last) = state.last_rpm {
+        state.last_rpm = Some(round_rpm(last.clamp(min_rpm, max_rpm)));
+    }
+}
+
 fn ema_update(prev: Option<f32>, sample: Option<f32>, alpha: f32) -> Option<f32> {
     match (prev, sample) {
+        (Some(p), Some(s)) => Some(p + alpha * (s - p)),
+        (_, Some(s)) => Some(s),
+        (p, None) => p,
+    }
+}
+
+fn reconcile_cooler_sample(smoothed: Option<f32>, sample: Option<f32>) -> Option<f32> {
+    match (smoothed, sample) {
+        (Some(p), Some(s)) if p > s + DEFAULT_TEMP_FAST_COOL_C => Some(s),
+        (_, sample) => sample,
+    }
+}
+
+fn ema_update_temp(
+    prev: Option<f32>,
+    sample: Option<f32>,
+    alpha: f32,
+    spike_reject_c: f32,
+) -> Option<f32> {
+    match (prev, sample) {
+        (Some(p), Some(s)) if s > p + spike_reject_c => Some(p),
         (Some(p), Some(s)) => Some(p + alpha * (s - p)),
         (_, Some(s)) => Some(s),
         (p, None) => p,
@@ -267,6 +343,7 @@ mod tests {
             cpu_temp_c: Some(70.0),
             gpu_temp_c: Some(65.0),
             laptop_fan_actual_rpm: Some(2000),
+            laptop_fan_cap_rpm: None,
             min_rpm: 600,
             max_rpm: 3200,
             off_below_c: 55.0,
@@ -280,6 +357,7 @@ mod tests {
             rpm_slew_up_per_sec: 10_000,
             rpm_slew_down_per_sec: 10_000,
             follow_temp_margin_c: 0.0,
+            laptop_fan_follow_enabled: true,
         }
     }
 
@@ -397,6 +475,43 @@ mod tests {
     }
 
     #[test]
+    fn lowered_max_clamps_overcool_hold() {
+        let mut state = CoolingPadAutoState::default();
+        state.overcool_hold_rpm = Some(3200);
+        state.last_rpm = Some(3200);
+        state.overcool_secs_left = 30.0;
+        clamp_auto_state_to_limits(&mut state, 600, 1500);
+        assert_eq!(state.overcool_hold_rpm, Some(1500));
+        assert_eq!(state.last_rpm, Some(1500));
+        assert_eq!(state.overcool_secs_left, 0.0);
+    }
+
+    #[test]
+    fn laptop_cap_limits_follow_rpm() {
+        let mut state = CoolingPadAutoState::default();
+        let mut inp = inputs();
+        inp.off_below_c = 50.0;
+        inp.full_above_c = 60.0;
+        inp.min_rpm = 600;
+        inp.max_rpm = 3200;
+        inp.cpu_temp_c = Some(75.0);
+        inp.laptop_fan_actual_rpm = Some(5500);
+        inp.laptop_fan_cap_rpm = Some(2000);
+        inp.follow_temp_margin_c = 0.0;
+        inp.turn_on_delay_secs = 0.0;
+        inp.overcool_hold_secs = 0.0;
+        inp.rpm_slew_up_per_sec = 10_000;
+
+        let CoolingPadAutoOutput::Rpm(rpm) = tick(&inp, &mut state) else {
+            panic!("expected rpm");
+        };
+        let uncapped_follow = scale_laptop_fan_rpm(5500, 600, 3200);
+        let capped_follow = scale_laptop_fan_rpm(2000, 600, 3200);
+        assert!(rpm <= capped_follow + 200);
+        assert!(rpm < uncapped_follow);
+    }
+
+    #[test]
     fn slew_step_and_curve_helpers() {
         assert_eq!(slew_step(150, 1.0), 150);
         assert_eq!(slew_toward(600, 3200, 150, 2500), 750);
@@ -467,5 +582,91 @@ mod tests {
             panic!("expected rpm");
         };
         assert!(rpm >= 2000);
+    }
+
+    #[test]
+    fn temp_spike_does_not_force_max_rpm() {
+        let mut state = CoolingPadAutoState::default();
+        let mut inp = inputs();
+        inp.off_below_c = 60.0;
+        inp.cpu_temp_c = Some(62.0);
+        inp.gpu_temp_c = Some(62.0);
+        inp.laptop_fan_actual_rpm = None;
+        inp.follow_temp_margin_c = 100.0;
+        inp.turn_on_delay_secs = 0.0;
+        inp.overcool_hold_secs = 0.0;
+        inp.temp_ema_alpha = 1.0;
+        for _ in 0..2 {
+            let _ = tick(&inp, &mut state);
+        }
+        let CoolingPadAutoOutput::Rpm(baseline) = tick(&inp, &mut state) else {
+            panic!("expected rpm");
+        };
+        assert_eq!(baseline, 600);
+
+        inp.cpu_temp_c = Some(92.0);
+        let CoolingPadAutoOutput::Rpm(spike) = tick(&inp, &mut state) else {
+            panic!("expected rpm");
+        };
+        assert_eq!(spike, baseline);
+    }
+
+    #[test]
+    fn follow_disabled_ignores_laptop_rpm() {
+        let mut state = CoolingPadAutoState::default();
+        let mut inp = inputs();
+        inp.cpu_temp_c = Some(55.0);
+        inp.gpu_temp_c = Some(55.0);
+        inp.laptop_fan_actual_rpm = Some(5500);
+        inp.laptop_fan_follow_enabled = false;
+        inp.follow_temp_margin_c = 0.0;
+        inp.turn_on_delay_secs = 0.0;
+        inp.overcool_hold_secs = 0.0;
+        inp.temp_ema_alpha = 1.0;
+        inp.rpm_slew_up_per_sec = 10_000;
+
+        let CoolingPadAutoOutput::Rpm(rpm) = tick(&inp, &mut state) else {
+            panic!("expected rpm");
+        };
+        let with_follow = {
+            let mut s = CoolingPadAutoState::default();
+            let mut i = inp;
+            i.laptop_fan_follow_enabled = true;
+            for _ in 0..5 {
+                tick(&i, &mut s);
+            }
+            let CoolingPadAutoOutput::Rpm(r) = tick(&i, &mut s) else {
+                panic!("expected rpm");
+            };
+            r
+        };
+        assert!(with_follow > rpm);
+    }
+
+    #[test]
+    fn fast_cool_snaps_stuck_high_smoothed() {
+        let mut state = CoolingPadAutoState::default();
+        state.smoothed_cpu_c = Some(85.0);
+        state.smoothed_gpu_c = Some(85.0);
+        state.fan_running = true;
+        state.last_rpm = Some(3200);
+        state.overcool_hold_rpm = Some(3200);
+
+        let mut inp = inputs();
+        inp.off_below_c = 60.0;
+        inp.full_above_c = 86.0;
+        inp.cpu_temp_c = Some(65.0);
+        inp.gpu_temp_c = Some(65.0);
+        inp.laptop_fan_actual_rpm = None;
+        inp.follow_temp_margin_c = 100.0;
+        inp.turn_on_delay_secs = 0.0;
+        inp.overcool_hold_secs = 0.0;
+        inp.temp_ema_alpha = 0.25;
+        inp.rpm_slew_down_per_sec = 10_000;
+
+        let CoolingPadAutoOutput::Rpm(rpm) = tick(&inp, &mut state) else {
+            panic!("expected rpm");
+        };
+        assert!(rpm < 3200);
     }
 }

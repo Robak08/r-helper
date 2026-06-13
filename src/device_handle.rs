@@ -23,6 +23,15 @@ impl SharedDevice {
         self.0.lock().ok().map(|mut guard| f(&mut *guard))
     }
 
+    /// Non-blocking device access for the UI thread — skips work if another thread holds the lock.
+    pub fn try_with<R>(&self, f: impl FnOnce(&Device) -> R) -> Option<R> {
+        self.0.try_lock().ok().map(|guard| f(&*guard))
+    }
+
+    pub fn try_with_mut<R>(&self, f: impl FnOnce(&mut Device) -> R) -> Option<R> {
+        self.0.try_lock().ok().map(|mut guard| f(&mut *guard))
+    }
+
 }
 
 /// Run a device command with standard error handling.

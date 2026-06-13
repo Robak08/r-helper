@@ -31,6 +31,8 @@ pub struct CoolingPadEnforceShared {
     pub auto_rpm_slew_down_per_sec: u16,
     pub auto_follow_temp_margin_c: f32,
     pub auto_temp_hysteresis_c: f32,
+    pub laptop_fan_cap_rpm: Option<u16>,
+    pub laptop_fan_follow_enabled: bool,
     pub auto_state: CoolingPadAutoState,
     pub last_enforce_time: Instant,
 }
@@ -54,6 +56,8 @@ impl Default for CoolingPadEnforceShared {
             auto_rpm_slew_down_per_sec: crate::cooling_pad_auto::DEFAULT_RPM_SLEW_DOWN_PER_SEC,
             auto_follow_temp_margin_c: crate::cooling_pad_auto::DEFAULT_FOLLOW_TEMP_MARGIN_C,
             auto_temp_hysteresis_c: crate::cooling_pad_auto::DEFAULT_TEMP_HYSTERESIS_C,
+            laptop_fan_cap_rpm: None,
+            laptop_fan_follow_enabled: true,
             auto_state: CoolingPadAutoState::default(),
             last_enforce_time: Instant::now(),
         }
@@ -68,7 +72,7 @@ pub struct CoolingPadEnforceContext {
 }
 
 impl CoolingPadEnforceContext {
-    pub fn start() -> Self {
+    pub fn start(shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let settings = Arc::new(Mutex::new(CoolingPadEnforceShared::default()));
         let laptop_fan_rpm = Arc::new(Mutex::new(None));
@@ -78,6 +82,7 @@ impl CoolingPadEnforceContext {
             Arc::clone(&settings),
             Arc::clone(&laptop_fan_rpm),
             Arc::clone(&pad),
+            Arc::clone(&shared_thermal),
             Arc::clone(&running),
         );
 
@@ -98,13 +103,12 @@ fn spawn_cooling_pad_enforcer(
     settings: Arc<Mutex<CoolingPadEnforceShared>>,
     laptop_fan_rpm: Arc<Mutex<Option<u16>>>,
     pad_slot: Arc<Mutex<Option<SharedCoolingPad>>>,
+    shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>,
     running: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
         .name("cooling-pad-enforce".into())
         .spawn(move || {
-            #[cfg(target_os = "windows")]
-            let mut thermal_reader = crate::system::thermal::ThermalReader::new();
             let mut last_tick = Instant::now();
 
             while running.load(Ordering::Relaxed) {
@@ -133,13 +137,10 @@ fn spawn_cooling_pad_enforcer(
                     continue;
                 }
 
-                let dt = last_tick.elapsed().as_secs_f32().clamp(0.05, 3.0);
+                let dt = last_tick.elapsed().as_secs_f32().clamp(0.05, 10.0);
                 last_tick = Instant::now();
 
-                #[cfg(target_os = "windows")]
-                let thermal = thermal_reader.read_snapshot();
-                #[cfg(not(target_os = "windows"))]
-                let thermal = crate::system::thermal::ThermalSnapshot::default();
+                let thermal = crate::thermal_poll::read_shared_thermal(&shared_thermal);
 
                 let laptop_rpm = laptop_fan_rpm.lock().ok().and_then(|g| *g);
 
@@ -154,6 +155,7 @@ fn spawn_cooling_pad_enforcer(
                             cpu_temp_c: thermal.cpu_avg_c,
                             gpu_temp_c: thermal.gpu_avg_c,
                             laptop_fan_actual_rpm: laptop_rpm,
+                            laptop_fan_cap_rpm: settings_guard.laptop_fan_cap_rpm,
                             min_rpm: settings_guard.auto_min_rpm,
                             max_rpm: settings_guard.auto_max_rpm,
                             off_below_c: settings_guard.auto_off_below_c,
@@ -167,6 +169,7 @@ fn spawn_cooling_pad_enforcer(
                             rpm_slew_up_per_sec: settings_guard.auto_rpm_slew_up_per_sec,
                             rpm_slew_down_per_sec: settings_guard.auto_rpm_slew_down_per_sec,
                             follow_temp_margin_c: settings_guard.auto_follow_temp_margin_c,
+                            laptop_fan_follow_enabled: settings_guard.laptop_fan_follow_enabled,
                         };
                         let output =
                             compute_combined_auto(&inputs, &mut settings_guard.auto_state);

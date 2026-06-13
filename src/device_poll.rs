@@ -19,6 +19,139 @@ use crate::power::get_power_state;
 const FAST_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const SLOW_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const HIDDEN_POLL_INTERVAL: Duration = Duration::from_millis(2500);
+const LAPTOP_FAN_CAP_HYSTERESIS: u16 = 300;
+const LAPTOP_FAN_CAP_INTERVAL: Duration = Duration::from_millis(800);
+
+/// Laptop auto-max RPM cap enforced on a dedicated thread (works while gaming / in tray).
+#[derive(Debug, Default)]
+pub struct LaptopFanCapShared {
+    pub limit_enabled: bool,
+    pub max_rpm: u16,
+    /// Skip enforcement while the user is dragging the max-RPM slider.
+    pub skip: bool,
+    pub cap_active: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LaptopFanState {
+    fan_mode: FanMode,
+    fan_set_rpm: Option<u16>,
+    fan_actual_rpm: Option<u16>,
+}
+
+fn read_laptop_fan_state(device: &Device) -> Option<LaptopFanState> {
+    let fan_actual_rpm = command::get_fan_actual_rpm(device, FanZone::Zone1).ok();
+    let (fan_mode, fan_set_rpm) = match command::get_perf_mode(device) {
+        Ok((_, fm)) => {
+            let rpm = if fm == FanMode::Manual {
+                command::get_fan_rpm(device, FanZone::Zone1).ok()
+            } else {
+                None
+            };
+            (fm, rpm)
+        }
+        Err(_) => return None,
+    };
+    Some(LaptopFanState {
+        fan_mode,
+        fan_set_rpm,
+        fan_actual_rpm,
+    })
+}
+
+/// Apply or release the auto-max cap. Returns `true` when `cap_active` changed.
+fn enforce_laptop_fan_cap(device: &Device, cap: &mut LaptopFanCapShared, fan: LaptopFanState) {
+    if cap.skip {
+        return;
+    }
+
+    if !cap.limit_enabled {
+        if cap.cap_active {
+            let _ = command::set_fan_mode(device, FanMode::Auto);
+            cap.cap_active = false;
+        }
+        return;
+    }
+
+    let max = cap.max_rpm;
+    let Some(actual) = fan.fan_actual_rpm else {
+        if cap.cap_active {
+            let _ = command::set_fan_rpm(device, max, true);
+        }
+        return;
+    };
+
+    if cap.cap_active {
+        if fan.fan_mode == FanMode::Manual
+            && fan.fan_set_rpm != Some(max)
+            && !cap.limit_enabled
+        {
+            cap.cap_active = false;
+            return;
+        }
+
+        if fan.fan_mode != FanMode::Manual {
+            let _ = command::set_fan_mode(device, FanMode::Manual);
+        }
+        let _ = command::set_fan_rpm(device, max, true);
+
+        if actual < max.saturating_sub(LAPTOP_FAN_CAP_HYSTERESIS) {
+            if command::set_fan_mode(device, FanMode::Auto).is_ok() {
+                cap.cap_active = false;
+            }
+        }
+        return;
+    }
+
+    if fan.fan_mode != FanMode::Auto {
+        return;
+    }
+
+    if actual > max
+        && command::set_fan_mode(device, FanMode::Manual).is_ok()
+        && command::set_fan_rpm(device, max, true).is_ok()
+    {
+        cap.cap_active = true;
+    }
+}
+
+fn laptop_fan_rpm_for_pad(snapshot: &DevicePollSnapshot, cap: &LaptopFanCapShared) -> Option<u16> {
+    let rpm = snapshot.fan_actual_rpm?;
+    if cap.limit_enabled {
+        Some(rpm.min(cap.max_rpm))
+    } else {
+        Some(rpm)
+    }
+}
+
+pub fn spawn_laptop_fan_cap_enforcer(
+    device: Arc<Mutex<Device>>,
+    laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
+) {
+    std::thread::Builder::new()
+        .name("laptop-fan-cap".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(LAPTOP_FAN_CAP_INTERVAL);
+
+                let Ok(mut cap) = laptop_fan_cap.lock() else {
+                    continue;
+                };
+                if cap.skip {
+                    continue;
+                }
+
+                let Ok(device) = device.try_lock() else {
+                    continue;
+                };
+                let Some(fan) = read_laptop_fan_state(&device) else {
+                    continue;
+                };
+                enforce_laptop_fan_cap(&device, &mut cap, fan);
+            }
+        })
+        .expect("laptop fan cap enforcer thread");
+}
 
 #[derive(Debug, Clone)]
 pub struct DevicePollSnapshot {
@@ -90,7 +223,10 @@ pub fn spawn_device_poller(
     brightness_slider_active: Arc<AtomicBool>,
     poll_slow: Arc<AtomicBool>,
     laptop_fan_rpm: Arc<Mutex<Option<u16>>>,
+    laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
 ) {
+    spawn_laptop_fan_cap_enforcer(Arc::clone(&device), Arc::clone(&laptop_fan_cap));
+
     std::thread::spawn(move || {
         let mut last_slow = Instant::now()
             .checked_sub(SLOW_POLL_INTERVAL)
@@ -123,7 +259,11 @@ pub fn spawn_device_poller(
             }
 
             if let Ok(mut shared) = laptop_fan_rpm.lock() {
-                *shared = snapshot.fan_actual_rpm;
+                if let Ok(cap) = laptop_fan_cap.lock() {
+                    *shared = laptop_fan_rpm_for_pad(&snapshot, &cap);
+                } else {
+                    *shared = snapshot.fan_actual_rpm;
+                }
             }
 
             if tx.send(snapshot).is_err() {
