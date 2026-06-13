@@ -59,7 +59,6 @@ pub fn get_perf_mode(device: &Device) -> Result<(PerfMode, FanMode)> {
     let r1 = r1?;
     let r2 = r2?;
 
-    //let r1 = r1?;
     ensure!(r1 == r2, "Modes do not match: r1 = {:?}, r2 = {:?}", r1, r2);
 
     Ok(r1)
@@ -127,14 +126,6 @@ pub fn get_max_fan_speed_mode(device: &Device) -> Result<MaxFanSpeedMode> {
 
 pub fn set_fan_mode(device: &Device, mode: FanMode) -> Result<()> {
     _set_perf_mode(device, get_perf_mode(device)?.0, mode)
-}
-
-pub fn custom_command(device: &Device, command: u16, args: &[u8]) -> Result<()> {
-    let report = Packet::new(command, args);
-    println!("Report   {:?}", report);
-    let response = device.send(report)?;
-    println!("Response {:?}", response);
-    Ok(())
 }
 
 fn _set_logo_power(device: &Device, mode: LogoMode) -> Result<Packet> {

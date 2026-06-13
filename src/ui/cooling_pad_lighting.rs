@@ -57,37 +57,21 @@ pub fn render_cooling_pad_lighting_section(
             });
 
             ui.horizontal(|ui| {
-                ui.label("Brightness:");
-                *temp_brightness_step = (*temp_brightness_step).min(BRIGHTNESS_LEVELS.len() - 1);
-                let mut step_index = *temp_brightness_step;
-                let response = ui.add(
-                    egui::Slider::new(&mut step_index, 0..=(BRIGHTNESS_LEVELS.len() - 1))
-                        .custom_formatter(|val, _| format!("{}", val as usize))
-                        .custom_parser(|s| s.parse::<f64>().ok()),
+                let (changed, active) = super::brightness_slider::brightness_step_slider(
+                    ui,
+                    "Brightness:",
+                    temp_brightness_step,
+                    BRIGHTNESS_LEVELS.len(),
                 );
-
-                let value_changed = step_index != *temp_brightness_step;
-                *temp_brightness_step = step_index;
-
-                if brightness_changed(&response, value_changed) {
-                    action.brightness = Some(BRIGHTNESS_LEVELS[*temp_brightness_step]);
-                }
-
-                if response.dragged() || response.has_focus() {
+                if active {
                     action.slider_active = Some(true);
-                } else if response.drag_stopped() || response.lost_focus() {
+                } else if changed {
                     action.slider_active = Some(false);
+                    action.brightness = Some(BRIGHTNESS_LEVELS[*temp_brightness_step]);
                 }
             });
         }
     });
 
     action
-}
-
-fn brightness_changed(response: &egui::Response, value_changed: bool) -> bool {
-    if value_changed {
-        return true;
-    }
-    response.dragged() || response.has_focus() || response.drag_stopped() || response.lost_focus()
 }

@@ -1,44 +1,128 @@
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThermalSnapshot {
     pub cpu_avg_c: Option<f32>,
     pub gpu_avg_c: Option<f32>,
 }
 
-/// Read CPU/GPU average temperatures via LHM WMI, then NVML (GPU) and ACPI (CPU) fallbacks.
-pub fn read_snapshot() -> ThermalSnapshot {
-    #[cfg(target_os = "windows")]
-    {
-        let result = std::panic::catch_unwind(read_snapshot_inner);
-        match result {
-            Ok(snapshot) => snapshot,
-            Err(_) => ThermalSnapshot::default(),
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        ThermalSnapshot::default()
-    }
+#[cfg(target_os = "windows")]
+pub struct ThermalReader {
+    hw_monitor: Vec<(String, wmi::WMIConnection)>,
+    perf_counter_wmi: Option<wmi::WMIConnection>,
+    acpi_wmi: Option<wmi::WMIConnection>,
+    nvml: Option<nvml_wrapper::Nvml>,
 }
 
 #[cfg(target_os = "windows")]
-fn read_snapshot_inner() -> ThermalSnapshot {
-    let (mut cpu_avg_c, mut gpu_avg_c) = read_hw_monitor_temps();
+impl ThermalReader {
+    pub fn new() -> Self {
+        let mut hw_monitor = Vec::new();
+        for namespace in HW_MONITOR_NAMESPACES {
+            if let Ok(wmi_con) = wmi::WMIConnection::with_namespace_path(namespace) {
+                hw_monitor.push((namespace.to_string(), wmi_con));
+            }
+        }
+        Self {
+            hw_monitor,
+            perf_counter_wmi: wmi::WMIConnection::new().ok(),
+            acpi_wmi: wmi::WMIConnection::with_namespace_path("ROOT\\WMI").ok(),
+            nvml: nvml_wrapper::Nvml::init().ok(),
+        }
+    }
 
-    if gpu_avg_c.is_none() {
-        gpu_avg_c = read_nvml_gpu_temp();
-    }
-    if cpu_avg_c.is_none() {
-        cpu_avg_c = read_perf_counter_cpu_temp();
-    }
-    if cpu_avg_c.is_none() {
-        cpu_avg_c = read_acpi_cpu_temp();
+    pub fn read_snapshot(&mut self) -> ThermalSnapshot {
+        let (mut cpu_avg_c, mut gpu_avg_c) = self.read_hw_monitor_temps();
+
+        if gpu_avg_c.is_none() {
+            gpu_avg_c = self.read_nvml_gpu_temp();
+        }
+        if cpu_avg_c.is_none() {
+            cpu_avg_c = self.read_perf_counter_cpu_temp();
+        }
+        if cpu_avg_c.is_none() {
+            cpu_avg_c = self.read_acpi_cpu_temp();
+        }
+
+        ThermalSnapshot {
+            cpu_avg_c,
+            gpu_avg_c,
+        }
     }
 
-    ThermalSnapshot {
-        cpu_avg_c,
-        gpu_avg_c,
+    fn read_hw_monitor_temps(&mut self) -> (Option<f32>, Option<f32>) {
+        let mut i = 0;
+        while i < self.hw_monitor.len() {
+            let namespace = self.hw_monitor[i].0.clone();
+            match query_hw_monitor_sensors_cached(&self.hw_monitor[i].1) {
+                Ok(sensors) => {
+                    let temp_sensors: Vec<&LhmSensor> = sensors
+                        .iter()
+                        .filter(|s| s.sensor_type.eq_ignore_ascii_case("Temperature"))
+                        .collect();
+
+                    let cpu = avg_lhm_cpu(&temp_sensors);
+                    let gpu = avg_lhm_gpu(&temp_sensors);
+                    if cpu.is_some() || gpu.is_some() {
+                        return (cpu, gpu);
+                    }
+                }
+                Err(_) => {
+                    if let Ok(wmi_con) = wmi::WMIConnection::with_namespace_path(&namespace) {
+                        self.hw_monitor[i].1 = wmi_con;
+                    } else {
+                        self.hw_monitor.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        (None, None)
+    }
+
+    fn read_nvml_gpu_temp(&mut self) -> Option<f32> {
+        use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
+
+        if self.nvml.is_none() {
+            self.nvml = nvml_wrapper::Nvml::init().ok();
+        }
+        let nvml = self.nvml.as_ref()?;
+        let count = nvml.device_count().ok()?;
+
+        for index in 0..count {
+            let device = nvml.device_by_index(index).ok()?;
+            let name = device.name().unwrap_or_default().to_ascii_lowercase();
+            if name.contains("intel")
+                || name.contains("microsoft")
+                || name.contains("virtual")
+                || name.contains("basic")
+            {
+                continue;
+            }
+            return device
+                .temperature(TemperatureSensor::Gpu)
+                .ok()
+                .map(|t| t as f32);
+        }
+
+        None
+    }
+
+    fn read_perf_counter_cpu_temp(&mut self) -> Option<f32> {
+        if self.perf_counter_wmi.is_none() {
+            self.perf_counter_wmi = wmi::WMIConnection::new().ok();
+        }
+        let wmi_con = self.perf_counter_wmi.as_ref()?;
+        read_perf_counter_cpu_temp_from(wmi_con)
+    }
+
+    fn read_acpi_cpu_temp(&mut self) -> Option<f32> {
+        if self.acpi_wmi.is_none() {
+            self.acpi_wmi = wmi::WMIConnection::with_namespace_path("ROOT\\WMI").ok();
+        }
+        let wmi_con = self.acpi_wmi.as_ref()?;
+        read_acpi_cpu_temp_from(wmi_con)
     }
 }
 
@@ -49,22 +133,10 @@ const HW_MONITOR_NAMESPACES: &[&str] = &[
 ];
 
 #[cfg(target_os = "windows")]
-fn read_hw_monitor_temps() -> (Option<f32>, Option<f32>) {
-    for namespace in HW_MONITOR_NAMESPACES {
-        if let Ok(sensors) = query_hw_monitor_sensors(namespace) {
-            let temp_sensors: Vec<&LhmSensor> = sensors
-                .iter()
-                .filter(|s| s.sensor_type.eq_ignore_ascii_case("Temperature"))
-                .collect();
-
-            let cpu = avg_lhm_cpu(&temp_sensors);
-            let gpu = avg_lhm_gpu(&temp_sensors);
-            if cpu.is_some() || gpu.is_some() {
-                return (cpu, gpu);
-            }
-        }
-    }
-    (None, None)
+fn query_hw_monitor_sensors_cached(
+    wmi_con: &wmi::WMIConnection,
+) -> Result<Vec<LhmSensor>, wmi::WMIError> {
+    wmi_con.query()
 }
 
 #[cfg(target_os = "windows")]
@@ -76,12 +148,6 @@ struct LhmSensor {
     sensor_type: String,
     #[serde(default)]
     identifier: String,
-}
-
-#[cfg(target_os = "windows")]
-fn query_hw_monitor_sensors(namespace: &str) -> Result<Vec<LhmSensor>, wmi::WMIError> {
-    let wmi_con = wmi::WMIConnection::with_namespace_path(namespace)?;
-    wmi_con.query()
 }
 
 #[cfg(target_os = "windows")]
@@ -149,33 +215,6 @@ fn avg_lhm_gpu(sensors: &[&LhmSensor]) -> Option<f32> {
 }
 
 #[cfg(target_os = "windows")]
-fn read_nvml_gpu_temp() -> Option<f32> {
-    use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
-    use nvml_wrapper::Nvml;
-
-    let nvml = Nvml::init().ok()?;
-    let count = nvml.device_count().ok()?;
-
-    for index in 0..count {
-        let device = nvml.device_by_index(index).ok()?;
-        let name = device.name().unwrap_or_default().to_ascii_lowercase();
-        if name.contains("intel")
-            || name.contains("microsoft")
-            || name.contains("virtual")
-            || name.contains("basic")
-        {
-            continue;
-        }
-        return device
-            .temperature(TemperatureSensor::Gpu)
-            .ok()
-            .map(|t| t as f32);
-    }
-
-    None
-}
-
-#[cfg(target_os = "windows")]
 #[derive(Debug, Deserialize)]
 #[serde(rename = "Win32_PerfFormattedData_Counters_ThermalZoneInformation")]
 #[serde(rename_all = "PascalCase")]
@@ -231,8 +270,7 @@ fn is_acpi_cpu_thermal_zone(name: &str) -> bool {
 
 /// Windows performance-counter thermal zones (no admin required on most systems).
 #[cfg(target_os = "windows")]
-fn read_perf_counter_cpu_temp() -> Option<f32> {
-    let wmi_con = wmi::WMIConnection::new().ok()?;
+fn read_perf_counter_cpu_temp_from(wmi_con: &wmi::WMIConnection) -> Option<f32> {
     let zones: Vec<ThermalZonePerf> = wmi_con.query().ok()?;
 
     let cpu_zone_temps: Vec<f32> = zones
@@ -258,8 +296,7 @@ struct AcpiThermalZone {
 }
 
 #[cfg(target_os = "windows")]
-fn read_acpi_cpu_temp() -> Option<f32> {
-    let wmi_con = wmi::WMIConnection::with_namespace_path("ROOT\\WMI").ok()?;
+fn read_acpi_cpu_temp_from(wmi_con: &wmi::WMIConnection) -> Option<f32> {
     let zones: Vec<AcpiThermalZone> = wmi_con.query().ok()?;
 
     let temps: Vec<f32> = zones
@@ -278,12 +315,17 @@ mod tests {
 
     #[test]
     fn perf_counter_cpu_temp_matches_primary_zone() {
-        let temp = read_perf_counter_cpu_temp().expect("perf counter temp");
+        let wmi_con = wmi::WMIConnection::new().expect("wmi");
+        let temp = read_perf_counter_cpu_temp_from(&wmi_con).expect("perf counter temp");
         // Primary ACPI zone on this class of laptop; should not be diluted by EC zones.
         assert!(
             temp > 55.0,
             "expected primary CPU thermal zone (~62 C), got {temp}"
         );
+    }
+
+    fn read_snapshot() -> ThermalSnapshot {
+        ThermalReader::new().read_snapshot()
     }
 
     #[test]

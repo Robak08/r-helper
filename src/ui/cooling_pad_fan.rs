@@ -1,8 +1,7 @@
 use eframe::egui::{self, Color32, RichText};
+use librazer::cooling_pad::{MAX_RPM, MIN_RPM, RPM_STEP};
 
-const MIN_RPM: u16 = 500;
-const MAX_RPM: u16 = 3200;
-const RPM_STEP: f64 = 50.0;
+const RPM_STEP_F64: f64 = RPM_STEP as f64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoolingPadFanMode {
@@ -103,10 +102,10 @@ pub fn render_cooling_pad_fan_section(
                 let mut rpm_f = *manual_rpm as f64;
                 let response = ui.add(
                     egui::Slider::new(&mut rpm_f, MIN_RPM as f64..=MAX_RPM as f64)
-                        .step_by(RPM_STEP)
+                        .step_by(RPM_STEP_F64)
                         .custom_formatter(|val, _| format!("{}", val as u16)),
                 );
-                let rpm = ((rpm_f / RPM_STEP).round() * RPM_STEP) as u16;
+                let rpm = ((rpm_f / RPM_STEP_F64).round() * RPM_STEP_F64) as u16;
                 if rpm != *manual_rpm {
                     *manual_rpm = rpm;
                     if response.dragged() || response.has_focus() {
@@ -139,7 +138,7 @@ pub fn render_cooling_pad_fan_section(
                 if ui
                     .add(
                         egui::Slider::new(&mut min, MIN_RPM..=MAX_RPM)
-                            .step_by(RPM_STEP)
+                            .step_by(RPM_STEP_F64)
                             .custom_formatter(|val, _| format!("{}", val as u16)),
                     )
                     .changed()
@@ -157,7 +156,7 @@ pub fn render_cooling_pad_fan_section(
                 if ui
                     .add(
                         egui::Slider::new(&mut max, MIN_RPM..=MAX_RPM)
-                            .step_by(RPM_STEP)
+                            .step_by(RPM_STEP_F64)
                             .custom_formatter(|val, _| format!("{}", val as u16)),
                     )
                     .changed()

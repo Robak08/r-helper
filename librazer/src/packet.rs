@@ -32,9 +32,10 @@ impl Packet {
         let mut args_buffer = [0x00; 80];
         args_buffer[..args.len()].copy_from_slice(args);
 
+        let mut rng = rand::thread_rng();
         Packet {
             status: CommandStatus::New as u8,
-            id: rand::thread_rng().gen(),
+            id: rng.gen_range(u8::MIN..=u8::MAX),
             remaining_packets: 0x0000,
             protocol_type: 0x00,
             data_size: args.len() as u8,
@@ -44,10 +45,6 @@ impl Packet {
             crc: 0x00,
             reserved: 0x00,
         }
-    }
-
-    pub fn set_args(&mut self, args: &[u8]) {
-        self.args[..args.len()].copy_from_slice(args)
     }
 
     pub fn get_args(&self) -> &[u8] {

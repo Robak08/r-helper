@@ -7,9 +7,9 @@ use serde_json::Value;
 
 use crate::device::CompleteDeviceState;
 use crate::cooling_pad_auto::{
-    DEFAULT_FOLLOW_TEMP_MARGIN_C, DEFAULT_RPM_SLEW_DOWN_PER_SEC, DEFAULT_RPM_SLEW_UP_PER_SEC,
-    DEFAULT_TEMP_EMA_ALPHA, DEFAULT_TEMP_HYSTERESIS_C, DEFAULT_TURN_OFF_DELAY_SECS,
-    DEFAULT_TURN_ON_DELAY_SECS,
+    DEFAULT_FOLLOW_TEMP_MARGIN_C, DEFAULT_OVERCOOL_HOLD_SECS, DEFAULT_RPM_SLEW_DOWN_PER_SEC,
+    DEFAULT_RPM_SLEW_UP_PER_SEC, DEFAULT_TEMP_EMA_ALPHA, DEFAULT_TEMP_HYSTERESIS_C,
+    DEFAULT_TURN_OFF_DELAY_SECS, DEFAULT_TURN_ON_DELAY_SECS,
 };
 use crate::startup;
 
@@ -36,6 +36,8 @@ pub struct CoolingPadConfig {
     pub auto_turn_on_delay_secs: f32,
     #[serde(default = "default_auto_turn_off_delay_secs")]
     pub auto_turn_off_delay_secs: f32,
+    #[serde(default = "default_auto_overcool_hold_secs")]
+    pub auto_overcool_hold_secs: f32,
     #[serde(default = "default_auto_temp_ema_alpha")]
     pub auto_temp_ema_alpha: f32,
     #[serde(default = "default_auto_rpm_slew_up_per_sec")]
@@ -86,6 +88,10 @@ fn default_auto_turn_off_delay_secs() -> f32 {
     DEFAULT_TURN_OFF_DELAY_SECS
 }
 
+fn default_auto_overcool_hold_secs() -> f32 {
+    DEFAULT_OVERCOOL_HOLD_SECS
+}
+
 fn default_auto_temp_ema_alpha() -> f32 {
     DEFAULT_TEMP_EMA_ALPHA
 }
@@ -130,6 +136,7 @@ impl Default for CoolingPadConfig {
             auto_full_above_c: default_auto_full_above_c(),
             auto_turn_on_delay_secs: default_auto_turn_on_delay_secs(),
             auto_turn_off_delay_secs: default_auto_turn_off_delay_secs(),
+            auto_overcool_hold_secs: default_auto_overcool_hold_secs(),
             auto_temp_ema_alpha: default_auto_temp_ema_alpha(),
             auto_rpm_slew_up_per_sec: default_auto_rpm_slew_up_per_sec(),
             auto_rpm_slew_down_per_sec: default_auto_rpm_slew_down_per_sec(),
@@ -138,6 +145,77 @@ impl Default for CoolingPadConfig {
             lighting_mode: default_cooling_pad_lighting_mode(),
             color: default_cooling_pad_color(),
             brightness_step: default_cooling_pad_brightness_step(),
+        }
+    }
+}
+
+/// Runtime cooling-pad settings mirrored in the GUI app.
+#[derive(Debug, Clone)]
+pub struct CoolingPadRuntime {
+    pub fan_mode: String,
+    pub manual_rpm: u16,
+    pub auto_min_rpm: u16,
+    pub auto_max_rpm: u16,
+    pub auto_off_below_c: f32,
+    pub auto_full_above_c: f32,
+    pub auto_turn_on_delay_secs: f32,
+    pub auto_turn_off_delay_secs: f32,
+    pub auto_overcool_hold_secs: f32,
+    pub auto_temp_ema_alpha: f32,
+    pub auto_rpm_slew_up_per_sec: u16,
+    pub auto_rpm_slew_down_per_sec: u16,
+    pub auto_follow_temp_margin_c: f32,
+    pub auto_temp_hysteresis_c: f32,
+    pub lighting_mode: String,
+    pub color: [u8; 3],
+    pub brightness_step: usize,
+}
+
+impl From<&CoolingPadConfig> for CoolingPadRuntime {
+    fn from(cfg: &CoolingPadConfig) -> Self {
+        Self {
+            fan_mode: cfg.fan_mode.clone(),
+            manual_rpm: cfg.manual_rpm,
+            auto_min_rpm: cfg.auto_min_rpm,
+            auto_max_rpm: cfg.auto_max_rpm,
+            auto_off_below_c: cfg.auto_off_below_c,
+            auto_full_above_c: cfg.auto_full_above_c,
+            auto_turn_on_delay_secs: cfg.auto_turn_on_delay_secs,
+            auto_turn_off_delay_secs: cfg.auto_turn_off_delay_secs,
+            auto_overcool_hold_secs: cfg.auto_overcool_hold_secs,
+            auto_temp_ema_alpha: cfg.auto_temp_ema_alpha,
+            auto_rpm_slew_up_per_sec: cfg.auto_rpm_slew_up_per_sec,
+            auto_rpm_slew_down_per_sec: cfg.auto_rpm_slew_down_per_sec,
+            auto_follow_temp_margin_c: cfg.auto_follow_temp_margin_c,
+            auto_temp_hysteresis_c: cfg.auto_temp_hysteresis_c,
+            lighting_mode: cfg.lighting_mode.clone(),
+            color: cfg.color,
+            brightness_step: cfg.brightness_step,
+        }
+    }
+}
+
+impl From<CoolingPadRuntime> for CoolingPadConfig {
+    fn from(runtime: CoolingPadRuntime) -> Self {
+        Self {
+            fan_mode: runtime.fan_mode,
+            fan_on: false,
+            manual_rpm: runtime.manual_rpm,
+            auto_min_rpm: runtime.auto_min_rpm,
+            auto_max_rpm: runtime.auto_max_rpm,
+            auto_off_below_c: runtime.auto_off_below_c,
+            auto_full_above_c: runtime.auto_full_above_c,
+            auto_turn_on_delay_secs: runtime.auto_turn_on_delay_secs,
+            auto_turn_off_delay_secs: runtime.auto_turn_off_delay_secs,
+            auto_overcool_hold_secs: runtime.auto_overcool_hold_secs,
+            auto_temp_ema_alpha: runtime.auto_temp_ema_alpha,
+            auto_rpm_slew_up_per_sec: runtime.auto_rpm_slew_up_per_sec,
+            auto_rpm_slew_down_per_sec: runtime.auto_rpm_slew_down_per_sec,
+            auto_follow_temp_margin_c: runtime.auto_follow_temp_margin_c,
+            auto_temp_hysteresis_c: runtime.auto_temp_hysteresis_c,
+            lighting_mode: runtime.lighting_mode,
+            color: runtime.color,
+            brightness_step: runtime.brightness_step,
         }
     }
 }

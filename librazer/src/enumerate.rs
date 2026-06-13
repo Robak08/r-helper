@@ -1,4 +1,5 @@
 use crate::chroma::probe_peripheral_battery;
+use crate::cooling_pad::COOLING_PAD_PID;
 use crate::profile::lookup_profile;
 
 use anyhow::{Context, Result};
@@ -25,8 +26,6 @@ pub enum RazerDeviceKind {
     Peripheral,
 }
 
-pub const COOLING_PAD_PID: u16 = 0x0F43;
-
 fn device_kind(pid: u16) -> RazerDeviceKind {
     if lookup_profile(pid).is_some() {
         RazerDeviceKind::BladeLaptop
@@ -37,7 +36,7 @@ fn device_kind(pid: u16) -> RazerDeviceKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RazerDeviceSummary {
     pub pid: u16,
     pub name: String,

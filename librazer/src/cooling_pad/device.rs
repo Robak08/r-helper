@@ -1,4 +1,4 @@
-use super::fan::{self, fan_off, get_commanded_rpm, set_rpm, MAX_RPM, MIN_RPM};
+use super::fan::{self, fan_off, set_rpm};
 use super::lighting::{self, PadLightingMode};
 
 use crate::chroma::Rgb;
@@ -62,10 +62,6 @@ impl CoolingPadDevice {
         fan_off(&self.fan)
     }
 
-    pub fn commanded_rpm(&self) -> Result<u16> {
-        get_commanded_rpm(&self.fan)
-    }
-
     pub fn apply_lighting(
         &self,
         mode: PadLightingMode,
@@ -77,13 +73,6 @@ impl CoolingPadDevice {
             anyhow::bail!("Cooling pad lighting is not available");
         };
         lighting::apply_lighting(chroma, mode, rgb, brightness, clear_first)
-    }
-
-    pub fn set_lighting_mode(&self, mode: PadLightingMode, rgb: Rgb) -> Result<()> {
-        let Some(chroma) = self.chroma.as_ref() else {
-            anyhow::bail!("Cooling pad lighting is not available");
-        };
-        lighting::set_mode(chroma, mode, rgb)
     }
 
     pub fn apply_color_change(
@@ -110,14 +99,6 @@ impl CoolingPadDevice {
             anyhow::bail!("Cooling pad lighting is not available");
         };
         lighting::get_brightness(chroma)
-    }
-
-    pub const fn min_rpm() -> u16 {
-        MIN_RPM
-    }
-
-    pub const fn max_rpm() -> u16 {
-        MAX_RPM
     }
 }
 

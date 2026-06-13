@@ -62,7 +62,7 @@ impl TraySharedState {
         std::thread::spawn(move || {
             while !state.visible.load(Ordering::Relaxed) {
                 state.ctx.request_repaint();
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_secs(2));
             }
             state.wake_running.store(false, Ordering::SeqCst);
         });

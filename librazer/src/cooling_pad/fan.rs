@@ -68,17 +68,8 @@ pub fn fan_off(device: &hidapi::HidDevice) -> Result<()> {
     Ok(())
 }
 
-pub fn get_commanded_rpm(device: &hidapi::HidDevice) -> Result<u16> {
-    let mut buf = [0u8; REPORT_LEN];
-    buf[0] = REPORT_ID;
-    get_feature(device, &mut buf)?;
-    parse_rpm_from_buffer(&buf).ok_or_else(|| {
-        anyhow::anyhow!("Cooling pad fan report does not contain a valid RPM value")
-    })
-}
-
-/// Parse RPM only from an active manual-curve report (avoids garbage reads after off/transitions).
-pub fn parse_rpm_from_buffer(buf: &[u8; REPORT_LEN]) -> Option<u16> {
+#[cfg(test)]
+fn parse_rpm_from_buffer(buf: &[u8; REPORT_LEN]) -> Option<u16> {
     if buf[REPORT_CODE] != 0x01 || buf[CURVE_ID] != 0x05 {
         return None;
     }

@@ -155,7 +155,7 @@ pub fn raw_brightness_to_step_index(brightness: u8) -> usize {
     BRIGHTNESS_LEVELS
         .iter()
         .enumerate()
-        .min_by_key(|(_, &level)| (level as i16 - brightness as i16).abs())
+        .min_by_key(|&(_, level)| (*level as i16 - brightness as i16).abs())
         .map(|(idx, _)| idx)
         .unwrap_or(0)
 }

@@ -16,7 +16,7 @@ use librazer::cooling_pad::CoolingPadDevice;
 use crate::device::CompleteDeviceState;
 use crate::power::get_power_state;
 
-const FAST_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const FAST_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const SLOW_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const HIDDEN_POLL_INTERVAL: Duration = Duration::from_millis(2500);
 
@@ -41,14 +41,20 @@ pub fn spawn_cooling_pad_poller(
     device: Arc<Mutex<CoolingPadDevice>>,
     tx: Sender<CoolingPadPollSnapshot>,
     brightness_slider_active: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
+    poll_slow: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         loop {
-            if !cancel.load(Ordering::Relaxed) {
+            if !running.load(Ordering::Relaxed) {
                 break;
             }
-            std::thread::sleep(FAST_POLL_INTERVAL);
+            let interval = if poll_slow.load(Ordering::Relaxed) {
+                HIDDEN_POLL_INTERVAL
+            } else {
+                FAST_POLL_INTERVAL
+            };
+            std::thread::sleep(interval);
 
             let snapshot = {
                 let device = match device.try_lock() {

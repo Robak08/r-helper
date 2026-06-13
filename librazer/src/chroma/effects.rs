@@ -12,10 +12,6 @@ pub struct Rgb {
     pub b: u8,
 }
 
-impl Rgb {
-    pub const RAZER_GREEN: Self = Self { r: 0x00, g: 0xFF, b: 0x00 };
-}
-
 fn finalize(mut report: [u8; REPORT_LEN]) -> [u8; REPORT_LEN] {
     report[88] = xor_crc(&report);
     report
@@ -53,14 +49,6 @@ pub fn build_extended_static(
     report[8 + 7] = rgb.g;
     report[8 + 8] = rgb.b;
     finalize(report)
-}
-
-pub fn build_extended_breathing_random(
-    transaction_id: u8,
-    variable_storage: u8,
-    led_id: u8,
-) -> [u8; REPORT_LEN] {
-    extended_matrix_effect_base(transaction_id, 0x06, variable_storage, led_id, 0x02)
 }
 
 pub fn build_extended_breathing_single(

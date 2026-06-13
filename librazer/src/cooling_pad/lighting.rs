@@ -14,14 +14,6 @@ pub enum PadLightingMode {
 }
 
 impl PadLightingMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Static => "Static",
-            Self::Breathing => "Breathing",
-        }
-    }
-
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "Off" => Some(Self::Off),
