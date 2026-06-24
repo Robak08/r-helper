@@ -72,6 +72,8 @@ use device_handle::execute_command;
 // Dynamic app metadata from Cargo
 const APP_NAME: &str = "R-Helper";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(windows)]
+const SINGLE_INSTANCE_ID: &str = "R-Helper";
 const INFO_BATTERY_REFRESH_SECS: f32 = 5.0;
 const INFO_DEVICES_REFRESH_SECS: f32 = 10.0;
 const CONFIG_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -124,6 +126,8 @@ struct RazerGuiApp {
     _tray_guard: Option<tray::TrayHandle>,
     minimize_to_tray: bool,
     run_at_startup: bool,
+    #[cfg(windows)]
+    single_instance: Option<app_single_instance::PrimaryHandle>,
 
     init_power_read: bool,
     init_specs_complete: bool,
@@ -433,6 +437,8 @@ impl RazerGuiApp {
             _tray_guard: None,
             minimize_to_tray,
             run_at_startup,
+            #[cfg(windows)]
+            single_instance: None,
 
             init_power_read: false,
             init_specs_complete: false,
@@ -2344,6 +2350,17 @@ impl RazerGuiApp {
 
 impl eframe::App for RazerGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if self
+            .single_instance
+            .as_ref()
+            .is_some_and(|handle| handle.check_show())
+        {
+            if let Some(state) = self.tray_state.clone() {
+                state.show();
+            }
+        }
+
         if !self.is_window_visible() {
             self.poll_while_hidden(ctx);
             if self.should_quit {
@@ -2624,6 +2641,11 @@ fn set_windows_app_id() {
 fn set_windows_app_id() {}
 
 fn main() -> Result<(), eframe::Error> {
+    #[cfg(windows)]
+    if app_single_instance::notify_if_running(SINGLE_INSTANCE_ID) {
+        return Ok(());
+    }
+
     set_windows_app_id();
     let initial_height = 610.0;
     let egui_icon = load_icon();
@@ -2661,6 +2683,16 @@ fn main() -> Result<(), eframe::Error> {
             let tray_guard = tray::TrayHandle::init(tray_icon, Arc::clone(&tray_state));
             let unfocused_wake = ui_wake::RepaintWake::new(cc.egui_ctx.clone());
             let mut app = RazerGuiApp::new(unfocused_wake);
+            #[cfg(windows)]
+            {
+                let ctx = cc.egui_ctx.clone();
+                app.single_instance = Some(app_single_instance::start_primary(
+                    SINGLE_INSTANCE_ID,
+                    move || {
+                        ctx.request_repaint();
+                    },
+                ));
+            }
             app.tray_state = Some(tray_state);
             app._tray_guard = Some(tray_guard);
             app.base_window_height = initial_height as f32;
