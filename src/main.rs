@@ -241,9 +241,13 @@ impl RazerGuiApp {
 
     fn sync_laptop_fan_cap(&mut self) {
         if let Ok(mut cap) = self.laptop_fan_cap.lock() {
-            cap.limit_enabled = self.auto_fan_limit_enabled && self.is_user_auto_mode();
+            let user_auto = self.is_user_auto_mode();
+            cap.limit_enabled = self.auto_fan_limit_enabled && user_auto;
             cap.max_rpm = self.auto_fan_max_rpm;
             cap.skip = self.auto_fan_max_rpm_editing;
+            if !cap.limit_enabled {
+                cap.cap_active = false;
+            }
         }
     }
 
@@ -1632,6 +1636,12 @@ impl RazerGuiApp {
         ) {
             Ok(message) => {
                 self.status.fan_rpm = Some(rpm);
+                self.manual_fan_rpm = rpm;
+                self.auto_fan_cap_override = false;
+                if let Ok(mut cap) = self.laptop_fan_cap.lock() {
+                    cap.cap_active = false;
+                }
+                self.sync_laptop_fan_cap();
                 self.set_optional_status_message(message);
             }
             Err(message) => {
@@ -1825,6 +1835,7 @@ impl RazerGuiApp {
             FanAction::AutoMaxRpmDragging(rpm) => {
                 self.auto_fan_max_rpm = rpm;
                 self.auto_fan_max_rpm_editing = true;
+                self.sync_laptop_fan_cap();
             }
             FanAction::SetAutoFanMaxRpm(rpm) => {
                 self.auto_fan_max_rpm = rpm;
@@ -1832,6 +1843,7 @@ impl RazerGuiApp {
                 if self.auto_fan_cap_override {
                     self.set_fan_rpm_only(rpm);
                 }
+                self.sync_laptop_fan_cap();
                 self.sync_cooling_pad_enforce();
                 if let Err(e) = self.persist_config() {
                     self.set_error_message(format!("Failed to save config: {}", e));

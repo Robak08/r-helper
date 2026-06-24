@@ -59,21 +59,37 @@ fn read_laptop_fan_state(device: &Device) -> Option<LaptopFanState> {
     })
 }
 
-/// Apply or release the auto-max cap. Returns `true` when `cap_active` changed.
+/// Apply or release the auto-max cap while the user has laptop fan in Auto + limit enabled.
 fn enforce_laptop_fan_cap(device: &Device, cap: &mut LaptopFanCapShared, fan: LaptopFanState) {
     if cap.skip {
         return;
     }
 
     if !cap.limit_enabled {
-        if cap.cap_active {
-            let _ = command::set_fan_mode(device, FanMode::Auto);
+        cap.cap_active = false;
+        return;
+    }
+
+    let max = cap.max_rpm;
+
+    if fan.fan_mode == FanMode::Manual {
+        if cap.cap_active && fan.fan_set_rpm == Some(max) {
+            let _ = command::set_fan_rpm(device, max, true);
+            if let Some(actual) = fan.fan_actual_rpm {
+                if actual < max.saturating_sub(LAPTOP_FAN_CAP_HYSTERESIS) {
+                    if command::set_fan_mode(device, FanMode::Auto).is_ok() {
+                        cap.cap_active = false;
+                    }
+                }
+            }
+            return;
+        }
+        if cap.cap_active && fan.fan_set_rpm != Some(max) {
             cap.cap_active = false;
         }
         return;
     }
 
-    let max = cap.max_rpm;
     let Some(actual) = fan.fan_actual_rpm else {
         if cap.cap_active {
             let _ = command::set_fan_rpm(device, max, true);
@@ -82,14 +98,6 @@ fn enforce_laptop_fan_cap(device: &Device, cap: &mut LaptopFanCapShared, fan: La
     };
 
     if cap.cap_active {
-        if fan.fan_mode == FanMode::Manual
-            && fan.fan_set_rpm != Some(max)
-            && !cap.limit_enabled
-        {
-            cap.cap_active = false;
-            return;
-        }
-
         if fan.fan_mode != FanMode::Manual {
             let _ = command::set_fan_mode(device, FanMode::Manual);
         }
