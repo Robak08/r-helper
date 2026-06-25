@@ -31,7 +31,6 @@ pub struct CoolingPadEnforceShared {
     pub auto_rpm_slew_down_per_sec: u16,
     pub auto_follow_temp_margin_c: f32,
     pub auto_temp_hysteresis_c: f32,
-    pub laptop_fan_cap_rpm: Option<u16>,
     pub laptop_fan_follow_enabled: bool,
     pub auto_state: CoolingPadAutoState,
     pub last_enforce_time: Instant,
@@ -56,7 +55,6 @@ impl Default for CoolingPadEnforceShared {
             auto_rpm_slew_down_per_sec: crate::cooling_pad_auto::DEFAULT_RPM_SLEW_DOWN_PER_SEC,
             auto_follow_temp_margin_c: crate::cooling_pad_auto::DEFAULT_FOLLOW_TEMP_MARGIN_C,
             auto_temp_hysteresis_c: crate::cooling_pad_auto::DEFAULT_TEMP_HYSTERESIS_C,
-            laptop_fan_cap_rpm: None,
             laptop_fan_follow_enabled: true,
             auto_state: CoolingPadAutoState::default(),
             last_enforce_time: Instant::now(),
@@ -154,8 +152,11 @@ fn spawn_cooling_pad_enforcer(
                         let inputs = CoolingPadAutoInputs {
                             cpu_temp_c: thermal.cpu_avg_c,
                             gpu_temp_c: thermal.gpu_avg_c,
-                            laptop_fan_actual_rpm: laptop_rpm,
-                            laptop_fan_cap_rpm: settings_guard.laptop_fan_cap_rpm,
+                            laptop_fan_actual_rpm: if settings_guard.laptop_fan_follow_enabled {
+                                laptop_rpm
+                            } else {
+                                None
+                            },
                             min_rpm: settings_guard.auto_min_rpm,
                             max_rpm: settings_guard.auto_max_rpm,
                             off_below_c: settings_guard.auto_off_below_c,

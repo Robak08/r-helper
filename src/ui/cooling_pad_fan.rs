@@ -38,6 +38,7 @@ pub enum CoolingPadFanAction {
     SetAutoMaxRpm(u16),
     SetAutoOffBelowC(f32),
     SetAutoFullAboveC(f32),
+    ToggleFollowLaptopFan(bool),
 }
 
 pub fn render_cooling_pad_fan_section(
@@ -49,6 +50,7 @@ pub fn render_cooling_pad_fan_section(
     auto_max_rpm: &mut u16,
     auto_off_below_c: &mut f32,
     auto_full_above_c: &mut f32,
+    follow_laptop_fan: &mut bool,
 ) -> CoolingPadFanAction {
     let mut action = CoolingPadFanAction::None;
 
@@ -120,6 +122,14 @@ pub fn render_cooling_pad_fan_section(
         }
 
         if fan_mode == CoolingPadFanMode::Auto {
+            ui.horizontal(|ui| {
+                let mut follow = *follow_laptop_fan;
+                if ui.checkbox(&mut follow, "Follow laptop fan").changed() {
+                    *follow_laptop_fan = follow;
+                    action = CoolingPadFanAction::ToggleFollowLaptopFan(follow);
+                }
+            });
+
             ui.horizontal(|ui| {
                 ui.label("Off below:");
                 let mut off = *auto_off_below_c;

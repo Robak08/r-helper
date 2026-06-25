@@ -11,6 +11,7 @@ mod device_handle;
 mod device_poll;
 mod device_sync;
 mod hid_enum_poll;
+mod laptop_fan_cap;
 mod messaging;
 mod power;
 mod startup;
@@ -56,8 +57,8 @@ use cooling_pad_handle::SharedCoolingPad;
 use device_handle::SharedDevice;
 use device_poll::{
     spawn_cooling_pad_poller, spawn_device_poller, CoolingPadPollSnapshot, DevicePollSnapshot,
-    LaptopFanCapShared,
 };
+use laptop_fan_cap::{spawn_laptop_fan_cap_enforcer, LaptopFanCapShared};
 use hid_enum_poll::{spawn_hid_enum_poller, HidEnumMessage};
 use messaging::{error_message, status_message, MessageManager};
 use power::{get_battery_status, get_power_state, BatteryStatus};
@@ -102,7 +103,6 @@ struct RazerGuiApp {
     fully_initialized: bool,
     init_receiver: Option<mpsc::Receiver<InitMessage>>,
     poll_receiver: Option<mpsc::Receiver<DevicePollSnapshot>>,
-    thermal_receiver: Option<mpsc::Receiver<ThermalSnapshot>>,
     thermal: ThermalSnapshot,
     poll_brightness_skip: Arc<AtomicBool>,
     poll_slow: Arc<AtomicBool>,
@@ -168,6 +168,7 @@ struct RazerGuiApp {
     cooling_pad_auto_rpm_slew_down_per_sec: u16,
     cooling_pad_auto_follow_temp_margin_c: f32,
     cooling_pad_auto_temp_hysteresis_c: f32,
+    cooling_pad_follow_laptop_fan: bool,
     cooling_pad_auto_state: CoolingPadAutoState,
     cooling_pad_lighting_mode: String,
     cooling_pad_color: [u8; 3],
@@ -182,6 +183,7 @@ struct RazerGuiApp {
     pending_cooling_pad_config_save: Option<std::time::Instant>,
     cooling_pad_enforce: CoolingPadEnforceContext,
     laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
+    laptop_fan_cap_enforcer_started: bool,
     shared_thermal: Arc<Mutex<ThermalSnapshot>>,
     last_cooling_pad_sync_time: std::time::Instant,
     unfocused_wake: Arc<ui_wake::RepaintWake>,
@@ -215,6 +217,7 @@ impl RazerGuiApp {
             auto_rpm_slew_down_per_sec: self.cooling_pad_auto_rpm_slew_down_per_sec,
             auto_follow_temp_margin_c: self.cooling_pad_auto_follow_temp_margin_c,
             auto_temp_hysteresis_c: self.cooling_pad_auto_temp_hysteresis_c,
+            follow_laptop_fan: self.cooling_pad_follow_laptop_fan,
             lighting_mode: self.cooling_pad_lighting_mode.clone(),
             color: self.cooling_pad_color,
             brightness_step: self.cooling_pad_brightness_step,
@@ -237,6 +240,7 @@ impl RazerGuiApp {
         self.cooling_pad_auto_rpm_slew_down_per_sec = runtime.auto_rpm_slew_down_per_sec;
         self.cooling_pad_auto_follow_temp_margin_c = runtime.auto_follow_temp_margin_c;
         self.cooling_pad_auto_temp_hysteresis_c = runtime.auto_temp_hysteresis_c;
+        self.cooling_pad_follow_laptop_fan = runtime.follow_laptop_fan;
         self.cooling_pad_lighting_mode = runtime.lighting_mode;
         self.cooling_pad_color = runtime.color;
         self.cooling_pad_brightness_step = runtime.brightness_step;
@@ -254,38 +258,7 @@ impl RazerGuiApp {
         }
     }
 
-    fn laptop_fan_follow_enabled(&self) -> bool {
-        if self.status.fan_mode == Some(FanMode::Manual) && !self.auto_fan_cap_override {
-            return false;
-        }
-        self.is_user_auto_mode() || self.auto_fan_cap_override
-    }
-
-    fn shared_laptop_fan_rpm_for_pad(&self) -> Option<u16> {
-        if !self.laptop_fan_follow_enabled() {
-            return None;
-        }
-        if let Ok(guard) = self.cooling_pad_enforce.laptop_fan_rpm.lock() {
-            if guard.is_some() {
-                return *guard;
-            }
-        }
-        let rpm = self.status.fan_actual_rpm?;
-        Some(match self.cooling_pad_laptop_fan_cap_rpm() {
-            Some(cap) => rpm.min(cap),
-            None => rpm,
-        })
-    }
-
-    fn clear_laptop_follow_on_pad(&mut self) {
-        clear_laptop_follow_smoothing(&mut self.cooling_pad_auto_state);
-        if let Ok(mut settings) = self.cooling_pad_enforce.settings.lock() {
-            clear_laptop_follow_smoothing(&mut settings.auto_state);
-        }
-    }
-
     fn sync_cooling_pad_enforce(&mut self) {
-        self.sync_laptop_fan_cap();
         if let Ok(mut settings) = self.cooling_pad_enforce.settings.lock() {
             settings.active = self.cooling_pad.is_some();
             settings.fully_initialized = self.fully_initialized && !self.loading;
@@ -303,8 +276,7 @@ impl RazerGuiApp {
             settings.auto_rpm_slew_down_per_sec = self.cooling_pad_auto_rpm_slew_down_per_sec;
             settings.auto_follow_temp_margin_c = self.cooling_pad_auto_follow_temp_margin_c;
             settings.auto_temp_hysteresis_c = self.cooling_pad_auto_temp_hysteresis_c;
-            settings.laptop_fan_cap_rpm = self.cooling_pad_laptop_fan_cap_rpm();
-            settings.laptop_fan_follow_enabled = self.laptop_fan_follow_enabled();
+            settings.laptop_fan_follow_enabled = self.cooling_pad_follow_laptop_fan;
             let min = settings.auto_min_rpm.clamp(librazer::cooling_pad::MIN_RPM, librazer::cooling_pad::MAX_RPM);
             let max = settings
                 .auto_max_rpm
@@ -335,11 +307,14 @@ impl RazerGuiApp {
         }
     }
 
-    fn cooling_pad_laptop_fan_cap_rpm(&self) -> Option<u16> {
-        if !self.laptop_fan_follow_enabled() || !self.auto_fan_limit_enabled {
+    fn shared_laptop_fan_rpm_for_pad(&self) -> Option<u16> {
+        if !self.cooling_pad_follow_laptop_fan {
             return None;
         }
-        Some(self.auto_fan_max_rpm)
+        if let Ok(guard) = self.cooling_pad_enforce.laptop_fan_rpm.lock() {
+            return *guard;
+        }
+        self.status.fan_actual_rpm
     }
 
     fn string_to_perf_mode(mode: &str) -> Option<PerfMode> {
@@ -413,7 +388,6 @@ impl RazerGuiApp {
             fully_initialized: false,
             init_receiver: Some(init_receiver),
             poll_receiver: None,
-            thermal_receiver: None,
             thermal: ThermalSnapshot::default(),
             poll_brightness_skip: Arc::new(AtomicBool::new(false)),
             poll_slow: Arc::new(AtomicBool::new(false)),
@@ -484,6 +458,7 @@ impl RazerGuiApp {
             cooling_pad_auto_rpm_slew_down_per_sec: 0,
             cooling_pad_auto_follow_temp_margin_c: 0.0,
             cooling_pad_auto_temp_hysteresis_c: 0.0,
+            cooling_pad_follow_laptop_fan: true,
             cooling_pad_auto_state: CoolingPadAutoState::default(),
             cooling_pad_lighting_mode: String::new(),
             cooling_pad_color: [0, 0, 0],
@@ -498,6 +473,7 @@ impl RazerGuiApp {
             pending_cooling_pad_config_save: None,
             cooling_pad_enforce: CoolingPadEnforceContext::start(Arc::clone(&shared_thermal)),
             laptop_fan_cap: Arc::new(Mutex::new(LaptopFanCapShared::default())),
+            laptop_fan_cap_enforcer_started: false,
             shared_thermal,
             last_cooling_pad_sync_time: now,
             unfocused_wake,
@@ -569,13 +545,20 @@ impl RazerGuiApp {
     }
 
     fn start_thermal_poller(&mut self) {
-        let (tx, rx) = mpsc::channel();
-        self.thermal_receiver = Some(rx);
         spawn_thermal_poller(
-            tx,
             Arc::clone(&self.poll_slow),
             Arc::clone(&self.shared_thermal),
         );
+    }
+
+    fn refresh_thermal_from_shared(&mut self, ctx: &egui::Context) -> bool {
+        let snapshot = crate::thermal_poll::read_shared_thermal(&self.shared_thermal);
+        if snapshot == self.thermal {
+            return false;
+        }
+        self.thermal = snapshot;
+        ctx.request_repaint();
+        true
     }
 
     fn maybe_sync_cooling_pad_enforce(&mut self, interval_secs: f32) {
@@ -586,24 +569,7 @@ impl RazerGuiApp {
     }
 
     fn process_thermal_snapshots(&mut self, ctx: &egui::Context) -> bool {
-        let mut snapshots = Vec::new();
-        if let Some(ref rx) = self.thermal_receiver {
-            while let Ok(snapshot) = rx.try_recv() {
-                snapshots.push(snapshot);
-            }
-        }
-        if snapshots.is_empty() {
-            return false;
-        }
-        let Some(snapshot) = snapshots.into_iter().last() else {
-            return false;
-        };
-        if snapshot == self.thermal {
-            return false;
-        }
-        self.thermal = snapshot;
-        ctx.request_repaint();
-        true
+        self.refresh_thermal_from_shared(ctx)
     }
 
     fn start_device_detection(&mut self, sender: mpsc::Sender<InitMessage>) {
@@ -702,9 +668,22 @@ impl RazerGuiApp {
         profile.fan_mode
     }
 
-    /// Fix device/UI drift when auto RPM cap left the hardware in manual mode.
+    /// Safety net when the cap enforcer released but hardware stayed Manual@max.
     fn reconcile_auto_fan_cap_state(&mut self) {
         if !self.auto_fan_limit_enabled || self.auto_fan_max_rpm_editing {
+            return;
+        }
+
+        let cap_active = self
+            .laptop_fan_cap
+            .lock()
+            .map(|cap| cap.cap_active)
+            .unwrap_or(false);
+        if self.auto_fan_cap_override != cap_active {
+            self.auto_fan_cap_override = cap_active;
+        }
+
+        if cap_active {
             return;
         }
 
@@ -712,50 +691,15 @@ impl RazerGuiApp {
             return;
         };
 
-        let Some((fan_mode, set_rpm)) =
-            device.try_with(|d| Self::read_current_fan_state(d))
-        else {
+        let Some((fan_mode, set_rpm)) = device.try_with(|d| Self::read_current_fan_state(d)) else {
             return;
         };
 
-        if fan_mode != FanMode::Manual {
+        if fan_mode != FanMode::Manual || set_rpm != Some(self.auto_fan_max_rpm) {
             return;
         }
 
-        let Some(set_rpm) = set_rpm else {
-            return;
-        };
-
-        let max = self.auto_fan_max_rpm;
-        if set_rpm != max {
-            return;
-        }
-
-        let ui_expects_auto = self.is_user_auto_mode()
-            || self.active_profile_fan_mode() == FanMode::Auto;
-        if !ui_expects_auto {
-            return;
-        }
-
-        let actual = self.status.fan_actual_rpm.unwrap_or(max);
-        if actual > max {
-            self.auto_fan_cap_override = true;
-            self.status.fan_mode = Some(FanMode::Auto);
-            self.status.fan_rpm = Some(max);
-            return;
-        }
-
-        if self
-            .laptop_fan_cap
-            .lock()
-            .map(|cap| cap.cap_active)
-            .unwrap_or(false)
-        {
-            self.auto_fan_cap_override = true;
-            return;
-        }
-
-        if self.is_user_auto_mode() {
+        if self.is_user_auto_mode() || self.active_profile_fan_mode() == FanMode::Auto {
             self.restore_auto_fan_mode();
         }
     }
@@ -792,8 +736,15 @@ impl RazerGuiApp {
             Arc::clone(&self.poll_brightness_skip),
             Arc::clone(&self.poll_slow),
             Arc::clone(&self.cooling_pad_enforce.laptop_fan_rpm),
-            Arc::clone(&self.laptop_fan_cap),
         );
+        if !self.laptop_fan_cap_enforcer_started {
+            spawn_laptop_fan_cap_enforcer(
+                device.arc(),
+                Arc::clone(&self.laptop_fan_cap),
+                Arc::clone(&self.shared_thermal),
+            );
+            self.laptop_fan_cap_enforcer_started = true;
+        }
     }
 
     fn try_attach_cooling_pad(&mut self) {
@@ -912,7 +863,6 @@ impl RazerGuiApp {
             cpu_temp_c: thermal.cpu_avg_c,
             gpu_temp_c: thermal.gpu_avg_c,
             laptop_fan_actual_rpm: self.shared_laptop_fan_rpm_for_pad(),
-            laptop_fan_cap_rpm: self.cooling_pad_laptop_fan_cap_rpm(),
             min_rpm: self.cooling_pad_auto_min_rpm,
             max_rpm: self.cooling_pad_auto_max_rpm,
             off_below_c: self.cooling_pad_auto_off_below_c,
@@ -926,7 +876,7 @@ impl RazerGuiApp {
             rpm_slew_up_per_sec: self.cooling_pad_auto_rpm_slew_up_per_sec,
             rpm_slew_down_per_sec: self.cooling_pad_auto_rpm_slew_down_per_sec,
             follow_temp_margin_c: self.cooling_pad_auto_follow_temp_margin_c,
-            laptop_fan_follow_enabled: self.laptop_fan_follow_enabled(),
+            laptop_fan_follow_enabled: self.cooling_pad_follow_laptop_fan,
         };
         compute_combined_auto(&inputs, &mut self.cooling_pad_auto_state)
     }
@@ -1615,11 +1565,7 @@ impl RazerGuiApp {
 
         match result {
             Some(Ok(())) => {
-                if mode == "manual" {
-                    self.clear_laptop_follow_on_pad();
-                }
                 self.sync_laptop_fan_cap();
-                self.sync_cooling_pad_enforce();
                 self.set_optional_status_message(format!("Fan set to {} mode", mode));
             }
             Some(Err(e)) => {
@@ -1766,6 +1712,11 @@ impl RazerGuiApp {
 
         let key = egui::Id::new("max_fan_speed_enabled");
         let mut max_enabled = ui.ctx().data(|d| d.get_temp::<bool>(key).unwrap_or(false));
+        let cap_active = self
+            .laptop_fan_cap
+            .lock()
+            .map(|cap| cap.cap_active)
+            .unwrap_or(false);
         let (action, new_toggle) = render_fan_section(
             ui,
             &self.status.fan_speed_label(),
@@ -1774,6 +1725,7 @@ impl RazerGuiApp {
             &mut self.manual_fan_rpm,
             self.auto_fan_limit_enabled,
             &mut self.auto_fan_max_rpm,
+            cap_active,
             self.status_messages,
             self.status.perf_mode == Some(PerfMode::Custom),
             max_enabled,
@@ -1824,14 +1776,10 @@ impl RazerGuiApp {
             FanAction::ToggleAutoFanLimit(enabled) => {
                 self.auto_fan_limit_enabled = enabled;
                 self.auto_fan_max_rpm_editing = false;
-                if !enabled {
-                    self.clear_laptop_follow_on_pad();
-                    if self.auto_fan_cap_override {
-                        self.restore_auto_fan_mode();
-                    }
+                if !enabled && self.auto_fan_cap_override {
+                    self.restore_auto_fan_mode();
                 }
                 self.sync_laptop_fan_cap();
-                self.sync_cooling_pad_enforce();
                 if let Err(e) = self.persist_config() {
                     self.set_error_message(format!("Failed to save config: {}", e));
                 }
@@ -2023,6 +1971,7 @@ impl RazerGuiApp {
             &mut self.cooling_pad_auto_max_rpm,
             &mut self.cooling_pad_auto_off_below_c,
             &mut self.cooling_pad_auto_full_above_c,
+            &mut self.cooling_pad_follow_laptop_fan,
         );
 
         match action {
@@ -2084,6 +2033,20 @@ impl RazerGuiApp {
                     self.apply_cooling_pad_fan_to_device();
                 }
                 self.schedule_cooling_pad_config_save();
+            }
+            CoolingPadFanAction::ToggleFollowLaptopFan(enabled) => {
+                self.cooling_pad_follow_laptop_fan = enabled;
+                if !enabled {
+                    if let Ok(mut settings) = self.cooling_pad_enforce.settings.lock() {
+                        clear_laptop_follow_smoothing(&mut settings.auto_state);
+                    }
+                    clear_laptop_follow_smoothing(&mut self.cooling_pad_auto_state);
+                }
+                self.sync_cooling_pad_enforce();
+                if self.cooling_pad_fan_mode == CoolingPadFanMode::Auto {
+                    self.apply_cooling_pad_fan_to_device();
+                }
+                self.save_cooling_pad_config();
             }
         }
     }
@@ -2330,6 +2293,7 @@ impl RazerGuiApp {
 
     fn poll_while_hidden(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        self.unfocused_wake.set_active(true);
         self.poll_slow.store(true, Ordering::Relaxed);
         self.maybe_sync_cooling_pad_enforce(3.0);
         if self.last_cooling_pad_pull_time.elapsed().as_secs_f32() >= 2.0 {
@@ -2394,13 +2358,13 @@ impl eframe::App for RazerGuiApp {
 
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         let viewport_focused = ctx.input(|i| i.viewport().focused.unwrap_or(i.focused));
+        let tray_hidden = !self.is_window_visible();
         self.unfocused_wake
-            .set_active(self.is_window_visible() && !viewport_focused);
+            .set_active(minimized || !viewport_focused || tray_hidden);
 
         self.poll_brightness_skip
             .store(self.brightness_slider_active, Ordering::Relaxed);
-        self.poll_slow
-            .store(minimized || !self.is_window_visible(), Ordering::Relaxed);
+        self.poll_slow.store(tray_hidden, Ordering::Relaxed);
         self.process_poll_snapshots(ctx);
         self.process_cooling_pad_poll_snapshots(ctx);
         self.process_thermal_snapshots(ctx);

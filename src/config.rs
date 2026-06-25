@@ -13,15 +13,12 @@ use crate::cooling_pad_auto::{
 };
 use crate::startup;
 
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoolingPadConfig {
     #[serde(default = "default_fan_mode")]
     pub fan_mode: String,
-    /// Legacy field — used only when `fan_mode` is absent from saved JSON.
-    #[serde(default, skip_serializing)]
-    pub fan_on: bool,
     #[serde(default = "default_cooling_pad_rpm")]
     pub manual_rpm: u16,
     #[serde(default = "default_auto_min_rpm")]
@@ -48,12 +45,18 @@ pub struct CoolingPadConfig {
     pub auto_follow_temp_margin_c: f32,
     #[serde(default = "default_auto_temp_hysteresis_c")]
     pub auto_temp_hysteresis_c: f32,
+    #[serde(default = "default_follow_laptop_fan")]
+    pub follow_laptop_fan: bool,
     #[serde(default = "default_cooling_pad_lighting_mode")]
     pub lighting_mode: String,
     #[serde(default = "default_cooling_pad_color")]
     pub color: [u8; 3],
     #[serde(default = "default_cooling_pad_brightness_step")]
     pub brightness_step: usize,
+}
+
+fn default_follow_laptop_fan() -> bool {
+    true
 }
 
 fn default_fan_mode() -> String {
@@ -128,7 +131,6 @@ impl Default for CoolingPadConfig {
     fn default() -> Self {
         Self {
             fan_mode: default_fan_mode(),
-            fan_on: false,
             manual_rpm: default_cooling_pad_rpm(),
             auto_min_rpm: default_auto_min_rpm(),
             auto_max_rpm: default_auto_max_rpm(),
@@ -142,6 +144,7 @@ impl Default for CoolingPadConfig {
             auto_rpm_slew_down_per_sec: default_auto_rpm_slew_down_per_sec(),
             auto_follow_temp_margin_c: default_auto_follow_temp_margin_c(),
             auto_temp_hysteresis_c: default_auto_temp_hysteresis_c(),
+            follow_laptop_fan: default_follow_laptop_fan(),
             lighting_mode: default_cooling_pad_lighting_mode(),
             color: default_cooling_pad_color(),
             brightness_step: default_cooling_pad_brightness_step(),
@@ -166,6 +169,7 @@ pub struct CoolingPadRuntime {
     pub auto_rpm_slew_down_per_sec: u16,
     pub auto_follow_temp_margin_c: f32,
     pub auto_temp_hysteresis_c: f32,
+    pub follow_laptop_fan: bool,
     pub lighting_mode: String,
     pub color: [u8; 3],
     pub brightness_step: usize,
@@ -188,6 +192,7 @@ impl From<&CoolingPadConfig> for CoolingPadRuntime {
             auto_rpm_slew_down_per_sec: cfg.auto_rpm_slew_down_per_sec,
             auto_follow_temp_margin_c: cfg.auto_follow_temp_margin_c,
             auto_temp_hysteresis_c: cfg.auto_temp_hysteresis_c,
+            follow_laptop_fan: cfg.follow_laptop_fan,
             lighting_mode: cfg.lighting_mode.clone(),
             color: cfg.color,
             brightness_step: cfg.brightness_step,
@@ -199,7 +204,6 @@ impl From<CoolingPadRuntime> for CoolingPadConfig {
     fn from(runtime: CoolingPadRuntime) -> Self {
         Self {
             fan_mode: runtime.fan_mode,
-            fan_on: false,
             manual_rpm: runtime.manual_rpm,
             auto_min_rpm: runtime.auto_min_rpm,
             auto_max_rpm: runtime.auto_max_rpm,
@@ -213,6 +217,7 @@ impl From<CoolingPadRuntime> for CoolingPadConfig {
             auto_rpm_slew_down_per_sec: runtime.auto_rpm_slew_down_per_sec,
             auto_follow_temp_margin_c: runtime.auto_follow_temp_margin_c,
             auto_temp_hysteresis_c: runtime.auto_temp_hysteresis_c,
+            follow_laptop_fan: runtime.follow_laptop_fan,
             lighting_mode: runtime.lighting_mode,
             color: runtime.color,
             brightness_step: runtime.brightness_step,
@@ -277,7 +282,14 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn load() -> Self {
         match Self::load_from_disk() {
-            Ok(config) => config,
+            Ok((config, migrated)) => {
+                if migrated {
+                    if let Err(e) = config.save() {
+                        eprintln!("Failed to rewrite migrated config: {e}");
+                    }
+                }
+                config
+            }
             Err(e) => {
                 eprintln!("Failed to load config (using defaults): {}", e);
                 Self::default()
@@ -296,7 +308,7 @@ impl AppConfig {
         Ok(())
     }
 
-    fn load_from_disk() -> Result<Self> {
+    fn load_from_disk() -> Result<(Self, bool)> {
         let path = config_file_path();
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;
@@ -304,25 +316,40 @@ impl AppConfig {
             serde_json::from_str(&contents).context("Failed to parse config JSON")?;
         let mut config: AppConfig =
             serde_json::from_value(raw.clone()).context("Failed to parse config JSON")?;
-        migrate_cooling_pad_config(&mut config.cooling_pad, &raw);
-        if config.version == 0 {
+        let mut migrated = false;
+        if config.version < CONFIG_VERSION {
+            migrate_config_to_v2(&mut config, &raw);
             config.version = CONFIG_VERSION;
+            migrated = true;
         }
-        Ok(config)
+        Ok((config, migrated))
     }
 }
 
-fn migrate_cooling_pad_config(cooling_pad: &mut CoolingPadConfig, raw: &Value) {
+fn migrate_config_to_v2(config: &mut AppConfig, raw: &Value) {
     let had_fan_mode = raw
         .get("cooling_pad")
         .and_then(|cp| cp.get("fan_mode"))
         .is_some();
     if !had_fan_mode {
-        cooling_pad.fan_mode = if cooling_pad.fan_on {
+        let fan_on = raw
+            .get("cooling_pad")
+            .and_then(|cp| cp.get("fan_on"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        config.cooling_pad.fan_mode = if fan_on {
             "manual".to_string()
         } else {
             "off".to_string()
         };
+    }
+
+    let had_follow = raw
+        .get("cooling_pad")
+        .and_then(|cp| cp.get("follow_laptop_fan"))
+        .is_some();
+    if !had_follow {
+        config.cooling_pad.follow_laptop_fan = default_follow_laptop_fan();
     }
 }
 
@@ -342,13 +369,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrates_legacy_fan_on_to_fan_mode() {
+    fn migrates_v1_fan_on_and_sets_follow_default() {
         let raw: Value = serde_json::json!({
+            "version": 1,
             "cooling_pad": { "fan_on": true, "manual_rpm": 2000 }
         });
-        let mut cfg: CoolingPadConfig = serde_json::from_value(raw["cooling_pad"].clone()).unwrap();
-        migrate_cooling_pad_config(&mut cfg, &raw);
-        assert_eq!(cfg.fan_mode, "manual");
+        let mut config = AppConfig::default();
+        config.version = 1;
+        migrate_config_to_v2(&mut config, &raw);
+        assert_eq!(config.cooling_pad.fan_mode, "manual");
+        assert!(config.cooling_pad.follow_laptop_fan);
+    }
+
+    #[test]
+    fn v2_save_omits_fan_on() {
+        let config = AppConfig::default();
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json["cooling_pad"].get("fan_on").is_none());
+        assert_eq!(json["version"], CONFIG_VERSION);
+    }
+
+    #[test]
+    fn loads_v2_follow_laptop_fan() {
+        let mut cfg = AppConfig::default();
+        cfg.cooling_pad.follow_laptop_fan = false;
+        let loaded: AppConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        assert!(!loaded.cooling_pad.follow_laptop_fan);
     }
 
     #[test]

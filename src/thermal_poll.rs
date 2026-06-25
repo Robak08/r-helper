@@ -1,6 +1,5 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::Sender,
     Arc, Mutex,
 };
 use std::time::Duration;
@@ -13,7 +12,6 @@ const FAST_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const SLOW_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 pub fn spawn_thermal_poller(
-    tx: Sender<ThermalSnapshot>,
     poll_slow: Arc<AtomicBool>,
     shared: Arc<Mutex<ThermalSnapshot>>,
 ) {
@@ -34,19 +32,12 @@ pub fn spawn_thermal_poller(
             #[cfg(not(target_os = "windows"))]
             let raw = ThermalSnapshot::default();
 
-            let snapshot = {
-                let mut guard = match shared.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => continue,
-                };
-                let filtered = filter_thermal_snapshot_spike(&guard, raw, &mut spike_state);
-                *guard = filtered.clone();
-                filtered
+            let mut guard = match shared.lock() {
+                Ok(guard) => guard,
+                Err(_) => continue,
             };
-
-            if tx.send(snapshot).is_err() {
-                break;
-            }
+            let filtered = filter_thermal_snapshot_spike(&guard, raw, &mut spike_state);
+            *guard = filtered;
         }
     });
 }

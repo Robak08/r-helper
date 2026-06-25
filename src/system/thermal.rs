@@ -102,17 +102,18 @@ impl ThermalReader {
     pub fn read_snapshot(&mut self) -> ThermalSnapshot {
         let (lhm_cpu, lhm_gpu) = self.read_hw_monitor_temps();
 
-        let mut cpu_readings = Vec::new();
-        if let Some(cpu) = lhm_cpu {
-            cpu_readings.push(cpu);
-        }
-        if let Some(cpu) = self.read_perf_counter_cpu_temp() {
-            cpu_readings.push(cpu);
-        }
-        if let Some(cpu) = self.read_acpi_cpu_temp() {
-            cpu_readings.push(cpu);
-        }
-        let cpu_avg_c = max_temp(&cpu_readings);
+        let cpu_avg_c = if let Some(cpu) = lhm_cpu {
+            thermal_debug_log("cpu", "lhm", cpu);
+            Some(cpu)
+        } else if let Some(cpu) = self.read_perf_counter_cpu_temp() {
+            thermal_debug_log("cpu", "perf_counter", cpu);
+            Some(cpu)
+        } else if let Some(cpu) = self.read_acpi_cpu_temp() {
+            thermal_debug_log("cpu", "acpi", cpu);
+            Some(cpu)
+        } else {
+            None
+        };
 
         let gpu_avg_c = lhm_gpu.or_else(|| self.read_nvml_gpu_temp());
 
@@ -197,6 +198,16 @@ impl ThermalReader {
         read_acpi_cpu_temp_from(wmi_con)
     }
 }
+
+#[cfg(target_os = "windows")]
+fn thermal_debug_log(sensor: &str, source: &str, value: f32) {
+    if std::env::var_os("R_HELPER_THERMAL_DEBUG").is_some() {
+        eprintln!("thermal {sensor}: {value:.1} C ({source})");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn thermal_debug_log(_sensor: &str, _source: &str, _value: f32) {}
 
 #[cfg(target_os = "windows")]
 const HW_MONITOR_NAMESPACES: &[&str] = &[
@@ -431,10 +442,19 @@ mod filter_tests {
         let after_normal = filter_thermal_snapshot_spike(&after_spike, normal, &mut state);
         assert_eq!(after_normal.cpu_avg_c, Some(63.0));
     }
+    #[test]
+    fn cpu_prefers_lhm_over_acpi_when_both_present() {
+        let lhm = Some(78.0_f32);
+        let perf = Some(68.0_f32);
+        let acpi = Some(92.0_f32);
+
+        let selected = lhm.or(perf).or(acpi);
+        assert_eq!(selected, Some(78.0));
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
-mod tests {
+mod windows_tests {
     use super::*;
 
     #[test]

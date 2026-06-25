@@ -30,6 +30,7 @@ pub fn render_fan_section(
     manual_fan_rpm: &mut u16,
     auto_fan_limit_enabled: bool,
     auto_fan_max_rpm: &mut u16,
+    cap_active: bool,
     show_status_messages: bool,
     custom_mode_active: bool,
     max_fan_speed_enabled: bool,
@@ -46,6 +47,7 @@ pub fn render_fan_section(
             fan_set_rpm,
             auto_fan_limit_enabled,
             *auto_fan_max_rpm,
+            cap_active,
             show_status_messages,
         );
         ui.separator();
@@ -118,6 +120,7 @@ fn render_fan_header(
     fan_set_rpm: Option<u16>,
     auto_fan_limit_enabled: bool,
     auto_fan_max_rpm: u16,
+    cap_active: bool,
     show_status_messages: bool,
 ) {
     ui.horizontal(|ui| {
@@ -126,9 +129,15 @@ fn render_fan_header(
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(actual_rpm) = fan_actual_rpm {
                 let rpm_color = calculate_rpm_color(actual_rpm);
+                let label = if cap_active && actual_rpm > auto_fan_max_rpm {
+                    format!("{actual_rpm} RPM (capped at {auto_fan_max_rpm})")
+                } else if cap_active {
+                    format!("{actual_rpm} RPM (cap {auto_fan_max_rpm})")
+                } else {
+                    format!("{actual_rpm} RPM")
+                };
                 ui.add(
-                    egui::Label::new(RichText::new(format!("{} RPM", actual_rpm)).color(rpm_color))
-                        .selectable(false),
+                    egui::Label::new(RichText::new(label).color(rpm_color)).selectable(false),
                 );
             } else {
                 ui.add(egui::Label::new(RichText::new("N/A")).selectable(false));
