@@ -1,7 +1,9 @@
 use serde::Deserialize;
 
-/// Ignore single-sample CPU/GPU jumps larger than this above the last value (WMI glitches).
+/// Max upward °C change accepted per poll before rate-limiting (WMI glitches).
 pub const DEFAULT_TEMP_SPIKE_REJECT_C: f32 = 12.0;
+/// Consecutive above-threshold polls before accepting the raw reading immediately.
+pub const SUSTAINED_HIGH_POLLS: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThermalSnapshot {
@@ -9,21 +11,66 @@ pub struct ThermalSnapshot {
     pub gpu_avg_c: Option<f32>,
 }
 
+/// Rate-limited upward climb: large jumps advance by `max_upward_jump_c` per poll instead of locking.
 pub fn filter_temp_spike(
     prev: Option<f32>,
     sample: Option<f32>,
     max_upward_jump_c: f32,
 ) -> Option<f32> {
     match (prev, sample) {
-        (Some(p), Some(s)) if s > p + max_upward_jump_c => Some(p),
+        (Some(p), Some(s)) if s > p + max_upward_jump_c => Some(s.min(p + max_upward_jump_c)),
         (_, sample) => sample,
     }
 }
 
-pub fn filter_thermal_snapshot_spike(prev: &ThermalSnapshot, new: ThermalSnapshot) -> ThermalSnapshot {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TempSpikeTrack {
+    consecutive_high: u32,
+}
+
+impl TempSpikeTrack {
+    pub fn filter(
+        &mut self,
+        prev: Option<f32>,
+        raw: Option<f32>,
+        max_upward_jump_c: f32,
+    ) -> Option<f32> {
+        match (prev, raw) {
+            (Some(p), Some(s)) if s > p + max_upward_jump_c => {
+                self.consecutive_high += 1;
+                if self.consecutive_high >= SUSTAINED_HIGH_POLLS {
+                    self.consecutive_high = 0;
+                    Some(s)
+                } else {
+                    Some(s.min(p + max_upward_jump_c))
+                }
+            }
+            (_, sample) => {
+                self.consecutive_high = 0;
+                filter_temp_spike(prev, sample, max_upward_jump_c)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThermalSpikeFilterState {
+    pub cpu: TempSpikeTrack,
+    pub gpu: TempSpikeTrack,
+}
+
+pub fn filter_thermal_snapshot_spike(
+    prev: &ThermalSnapshot,
+    new: ThermalSnapshot,
+    state: &mut ThermalSpikeFilterState,
+) -> ThermalSnapshot {
     ThermalSnapshot {
-        cpu_avg_c: filter_temp_spike(prev.cpu_avg_c, new.cpu_avg_c, DEFAULT_TEMP_SPIKE_REJECT_C),
-        gpu_avg_c: filter_temp_spike(prev.gpu_avg_c, new.gpu_avg_c, DEFAULT_TEMP_SPIKE_REJECT_C),
+        cpu_avg_c: state
+            .cpu
+            .filter(prev.cpu_avg_c, new.cpu_avg_c, DEFAULT_TEMP_SPIKE_REJECT_C),
+        gpu_avg_c: state
+            .gpu
+            .filter(prev.gpu_avg_c, new.gpu_avg_c, DEFAULT_TEMP_SPIKE_REJECT_C),
     }
 }
 
@@ -53,17 +100,21 @@ impl ThermalReader {
     }
 
     pub fn read_snapshot(&mut self) -> ThermalSnapshot {
-        let (mut cpu_avg_c, mut gpu_avg_c) = self.read_hw_monitor_temps();
+        let (lhm_cpu, lhm_gpu) = self.read_hw_monitor_temps();
 
-        if gpu_avg_c.is_none() {
-            gpu_avg_c = self.read_nvml_gpu_temp();
+        let mut cpu_readings = Vec::new();
+        if let Some(cpu) = lhm_cpu {
+            cpu_readings.push(cpu);
         }
-        if cpu_avg_c.is_none() {
-            cpu_avg_c = self.read_perf_counter_cpu_temp();
+        if let Some(cpu) = self.read_perf_counter_cpu_temp() {
+            cpu_readings.push(cpu);
         }
-        if cpu_avg_c.is_none() {
-            cpu_avg_c = self.read_acpi_cpu_temp();
+        if let Some(cpu) = self.read_acpi_cpu_temp() {
+            cpu_readings.push(cpu);
         }
+        let cpu_avg_c = max_temp(&cpu_readings);
+
+        let gpu_avg_c = lhm_gpu.or_else(|| self.read_nvml_gpu_temp());
 
         ThermalSnapshot {
             cpu_avg_c,
@@ -232,7 +283,7 @@ fn avg_lhm_gpu(sensors: &[&LhmSensor]) -> Option<f32> {
         return None;
     }
 
-    Some(gpu_temps.iter().sum::<f32>() / gpu_temps.len() as f32)
+    max_temp(&gpu_temps)
 }
 
 #[cfg(target_os = "windows")]
@@ -328,6 +379,58 @@ fn read_acpi_cpu_temp_from(wmi_con: &wmi::WMIConnection) -> Option<f32> {
         .collect();
 
     max_temp(&temps)
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn rate_limited_climb_reaches_target() {
+        let mut prev = Some(68.0_f32);
+        for _ in 0..10 {
+            prev = filter_temp_spike(prev, Some(95.0), 12.0);
+        }
+        assert_eq!(prev, Some(95.0));
+    }
+
+    #[test]
+    fn spike_filter_does_not_lock_when_sustained_high() {
+        let mut state = ThermalSpikeFilterState::default();
+        let mut prev = ThermalSnapshot {
+            cpu_avg_c: Some(68.0),
+            gpu_avg_c: None,
+        };
+        for _ in 0..3 {
+            let raw = ThermalSnapshot {
+                cpu_avg_c: Some(95.0),
+                gpu_avg_c: None,
+            };
+            prev = filter_thermal_snapshot_spike(&prev, raw, &mut state);
+        }
+        assert_eq!(prev.cpu_avg_c, Some(95.0));
+    }
+
+    #[test]
+    fn spike_filter_rejects_single_glitch() {
+        let mut state = ThermalSpikeFilterState::default();
+        let prev = ThermalSnapshot {
+            cpu_avg_c: Some(62.0),
+            gpu_avg_c: None,
+        };
+        let spike = ThermalSnapshot {
+            cpu_avg_c: Some(92.0),
+            gpu_avg_c: None,
+        };
+        let after_spike = filter_thermal_snapshot_spike(&prev, spike, &mut state);
+        assert_eq!(after_spike.cpu_avg_c, Some(74.0));
+        let normal = ThermalSnapshot {
+            cpu_avg_c: Some(63.0),
+            gpu_avg_c: None,
+        };
+        let after_normal = filter_thermal_snapshot_spike(&after_spike, normal, &mut state);
+        assert_eq!(after_normal.cpu_avg_c, Some(63.0));
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

@@ -61,7 +61,6 @@ use device_poll::{
 use hid_enum_poll::{spawn_hid_enum_poller, HidEnumMessage};
 use messaging::{error_message, status_message, MessageManager};
 use power::{get_battery_status, get_power_state, BatteryStatus};
-use system::thermal::filter_thermal_snapshot_spike;
 use system::{get_system_specs, resolve_device_model, SystemSpecs, ThermalSnapshot};
 use thermal_poll::spawn_thermal_poller;
 use ui::cooling_pad_fan::CoolingPadFanMode;
@@ -599,7 +598,6 @@ impl RazerGuiApp {
         let Some(snapshot) = snapshots.into_iter().last() else {
             return false;
         };
-        let snapshot = filter_thermal_snapshot_spike(&self.thermal, snapshot);
         if snapshot == self.thermal {
             return false;
         }

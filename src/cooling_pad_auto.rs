@@ -26,6 +26,8 @@ pub const DEFAULT_TEMP_HYSTERESIS_C: f32 = 3.0;
 pub const DEFAULT_TEMP_SPIKE_REJECT_C: f32 = 12.0;
 /// When the filtered reading is this much below smoothed, trust it immediately (stuck-high recovery).
 pub const DEFAULT_TEMP_FAST_COOL_C: f32 = 8.0;
+/// When the filtered reading is this much above smoothed, trust it immediately (stuck-low recovery).
+pub const DEFAULT_TEMP_FAST_HEAT_C: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoolingPadAutoOutput {
@@ -80,8 +82,14 @@ pub fn compute_combined_auto(
     let alpha = inputs.temp_ema_alpha.clamp(0.05, 1.0);
 
     let spike_reject = DEFAULT_TEMP_SPIKE_REJECT_C;
-    let cpu_sample = reconcile_cooler_sample(state.smoothed_cpu_c, inputs.cpu_temp_c);
-    let gpu_sample = reconcile_cooler_sample(state.smoothed_gpu_c, inputs.gpu_temp_c);
+    let cpu_sample = reconcile_heat_sample(
+        state.smoothed_cpu_c,
+        reconcile_cooler_sample(state.smoothed_cpu_c, inputs.cpu_temp_c),
+    );
+    let gpu_sample = reconcile_heat_sample(
+        state.smoothed_gpu_c,
+        reconcile_cooler_sample(state.smoothed_gpu_c, inputs.gpu_temp_c),
+    );
     state.smoothed_cpu_c =
         ema_update_temp(state.smoothed_cpu_c, cpu_sample, alpha, spike_reject);
     state.smoothed_gpu_c =
@@ -253,6 +261,13 @@ fn reconcile_cooler_sample(smoothed: Option<f32>, sample: Option<f32>) -> Option
     }
 }
 
+fn reconcile_heat_sample(smoothed: Option<f32>, sample: Option<f32>) -> Option<f32> {
+    match (smoothed, sample) {
+        (Some(p), Some(s)) if s > p + DEFAULT_TEMP_FAST_HEAT_C => Some(s),
+        (_, sample) => sample,
+    }
+}
+
 fn ema_update_temp(
     prev: Option<f32>,
     sample: Option<f32>,
@@ -260,7 +275,14 @@ fn ema_update_temp(
     spike_reject_c: f32,
 ) -> Option<f32> {
     match (prev, sample) {
-        (Some(p), Some(s)) if s > p + spike_reject_c => Some(p),
+        (Some(p), Some(s)) if s > p + spike_reject_c => {
+            if s > p + DEFAULT_TEMP_FAST_HEAT_C {
+                Some(p + alpha * (s - p))
+            } else {
+                let clamped = s.min(p + spike_reject_c);
+                Some(p + alpha * (clamped - p))
+            }
+        }
         (Some(p), Some(s)) => Some(p + alpha * (s - p)),
         (_, Some(s)) => Some(s),
         (p, None) => p,
@@ -589,26 +611,29 @@ mod tests {
         let mut state = CoolingPadAutoState::default();
         let mut inp = inputs();
         inp.off_below_c = 60.0;
-        inp.cpu_temp_c = Some(62.0);
-        inp.gpu_temp_c = Some(62.0);
+        inp.full_above_c = 96.0;
+        inp.cpu_temp_c = Some(84.0);
+        inp.gpu_temp_c = Some(84.0);
         inp.laptop_fan_actual_rpm = None;
         inp.follow_temp_margin_c = 100.0;
         inp.turn_on_delay_secs = 0.0;
         inp.overcool_hold_secs = 0.0;
         inp.temp_ema_alpha = 1.0;
-        for _ in 0..2 {
+        for _ in 0..3 {
             let _ = tick(&inp, &mut state);
         }
         let CoolingPadAutoOutput::Rpm(baseline) = tick(&inp, &mut state) else {
             panic!("expected rpm");
         };
-        assert_eq!(baseline, 600);
 
+        // +8 °C — below fast-heat and spike-reject thresholds; should not hit max in one tick.
         inp.cpu_temp_c = Some(92.0);
+        inp.gpu_temp_c = Some(92.0);
         let CoolingPadAutoOutput::Rpm(spike) = tick(&inp, &mut state) else {
             panic!("expected rpm");
         };
-        assert_eq!(spike, baseline);
+        assert!(spike < inp.max_rpm);
+        assert!(spike >= baseline);
     }
 
     #[test]
@@ -668,5 +693,32 @@ mod tests {
             panic!("expected rpm");
         };
         assert!(rpm < 3200);
+    }
+
+    #[test]
+    fn fast_heat_snaps_stuck_low_smoothed() {
+        let mut state = CoolingPadAutoState::default();
+        state.smoothed_cpu_c = Some(45.0);
+        state.smoothed_gpu_c = Some(45.0);
+        state.fan_running = false;
+
+        let mut inp = inputs();
+        inp.off_below_c = 60.0;
+        inp.full_above_c = 86.0;
+        inp.cpu_temp_c = Some(72.0);
+        inp.gpu_temp_c = Some(72.0);
+        inp.laptop_fan_actual_rpm = None;
+        inp.follow_temp_margin_c = 100.0;
+        inp.turn_on_delay_secs = 0.0;
+        inp.overcool_hold_secs = 0.0;
+        inp.temp_ema_alpha = 1.0;
+        inp.rpm_slew_up_per_sec = 10_000;
+
+        tick(&inp, &mut state);
+        let peak = peak_temp(state.smoothed_cpu_c, state.smoothed_gpu_c).unwrap();
+        assert!(
+            peak > 65.0,
+            "expected fast-heat snap toward 72 C, got {peak}"
+        );
     }
 }
