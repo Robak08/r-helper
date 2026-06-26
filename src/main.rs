@@ -149,6 +149,7 @@ struct RazerGuiApp {
     cooling_pad_usb_present: bool,
 
     device_hydrated: bool,
+    startup_controls_applied: bool,
     cached_allowed_cpu: Vec<CpuBoost>,
     cached_allowed_gpu: Vec<GpuBoost>,
     cached_disallowed_pairs: Vec<(CpuBoost, GpuBoost)>,
@@ -434,6 +435,7 @@ impl RazerGuiApp {
             cooling_pad_usb_present: false,
 
             device_hydrated: false,
+            startup_controls_applied: false,
             cached_allowed_cpu: vec![
                 CpuBoost::Low,
                 CpuBoost::Medium,
@@ -714,11 +716,31 @@ impl RazerGuiApp {
         }
         self.cache_performance_metadata();
         self.start_device_poller();
-        if self.fully_initialized && !self.device_hydrated {
+        self.apply_startup_controls();
+    }
+
+    /// Push saved laptop profile, fan cap, and cooling pad settings to hardware once
+    /// both background init and device detection have finished (fixes autostart / boot gaps).
+    fn apply_startup_controls(&mut self) {
+        if !self.fully_initialized || self.device.is_none() || self.startup_controls_applied {
+            return;
+        }
+
+        if self.auto_switch_enabled {
+            self.auto_switch_profile();
+            self.device_hydrated = true;
+        } else if !self.device_hydrated {
             if let Err(e) = self.hydrate_from_device() {
                 self.set_error_message(format!("Failed to read device status: {}", e));
             }
         }
+
+        self.sync_laptop_fan_cap();
+        if self.cooling_pad.is_some() {
+            self.apply_cooling_pad_config_to_device();
+        }
+        self.sync_cooling_pad_enforce();
+        self.startup_controls_applied = true;
     }
 
     fn start_device_poller(&mut self) {
@@ -1117,12 +1139,8 @@ impl RazerGuiApp {
                 InitMessage::InitializationComplete => {
                     self.fully_initialized = true;
                     self.sync_cooling_pad_enforce();
-                    if self.device.is_some() && !self.device_hydrated {
-                        if let Err(e) = self.hydrate_from_device() {
-                            self.set_error_message(format!("Failed to read device status: {}", e));
-                        }
-                    }
                     self.try_attach_cooling_pad();
+                    self.apply_startup_controls();
                 }
             }
         }

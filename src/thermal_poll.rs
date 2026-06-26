@@ -5,7 +5,8 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::system::thermal::{
-    filter_thermal_snapshot_spike, ThermalReader, ThermalSnapshot, ThermalSpikeFilterState,
+    filter_thermal_raw_snapshot, CpuTempSource, ThermalReader, ThermalSnapshot,
+    ThermalSpikeFilterState,
 };
 
 const FAST_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -19,6 +20,7 @@ pub fn spawn_thermal_poller(
         #[cfg(target_os = "windows")]
         let mut reader = ThermalReader::new();
         let mut spike_state = ThermalSpikeFilterState::default();
+        let mut last_cpu_source: Option<CpuTempSource> = None;
         loop {
             let interval = if poll_slow.load(Ordering::Relaxed) {
                 SLOW_POLL_INTERVAL
@@ -30,13 +32,17 @@ pub fn spawn_thermal_poller(
             #[cfg(target_os = "windows")]
             let raw = reader.read_snapshot();
             #[cfg(not(target_os = "windows"))]
-            let raw = ThermalSnapshot::default();
+            let raw = crate::system::thermal::ThermalRawSnapshot {
+                snapshot: ThermalSnapshot::default(),
+                cpu_source: None,
+            };
 
             let mut guard = match shared.lock() {
                 Ok(guard) => guard,
                 Err(_) => continue,
             };
-            let filtered = filter_thermal_snapshot_spike(&guard, raw, &mut spike_state);
+            let filtered =
+                filter_thermal_raw_snapshot(&guard, raw, &mut spike_state, &mut last_cpu_source);
             *guard = filtered;
         }
     });
