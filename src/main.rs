@@ -14,6 +14,7 @@ mod hid_enum_poll;
 mod laptop_fan_cap;
 mod messaging;
 mod power;
+mod session_lock;
 mod startup;
 mod system;
 mod thermal_poll;
@@ -59,6 +60,7 @@ use device_poll::{
     spawn_cooling_pad_poller, spawn_device_poller, CoolingPadPollSnapshot, DevicePollSnapshot,
 };
 use laptop_fan_cap::{spawn_laptop_fan_cap_enforcer, LaptopFanCapShared};
+use session_lock::{new_device_slot, spawn_session_lock_monitor, DeviceSlot, SessionState};
 use hid_enum_poll::{spawn_hid_enum_poller, HidEnumMessage};
 use messaging::{error_message, status_message, MessageManager};
 use power::{get_battery_status, get_power_state, BatteryStatus};
@@ -187,7 +189,8 @@ struct RazerGuiApp {
     laptop_fan_cap_enforcer_started: bool,
     shared_thermal: Arc<Mutex<ThermalSnapshot>>,
     last_cooling_pad_sync_time: std::time::Instant,
-    unfocused_wake: Arc<ui_wake::RepaintWake>,
+    repaint_wake: Arc<ui_wake::RepaintWake>,
+    session_device_slot: DeviceSlot,
 }
 
 impl RazerGuiApp {
@@ -355,7 +358,10 @@ impl RazerGuiApp {
         self.set_status_message("No device connected".to_string());
     }
 
-    fn new(unfocused_wake: Arc<ui_wake::RepaintWake>) -> Self {
+    fn new(
+        repaint_wake: Arc<ui_wake::RepaintWake>,
+        session_device_slot: DeviceSlot,
+    ) -> Self {
         let app_config = config::AppConfig::load();
         let ac_profile = app_config.ac_profile;
         let battery_profile = app_config.battery_profile;
@@ -478,7 +484,8 @@ impl RazerGuiApp {
             laptop_fan_cap_enforcer_started: false,
             shared_thermal,
             last_cooling_pad_sync_time: now,
-            unfocused_wake,
+            repaint_wake,
+            session_device_slot,
         };
 
         app.apply_cooling_pad_runtime(cooling_pad_cfg);
@@ -708,6 +715,9 @@ impl RazerGuiApp {
 
     fn on_device_attached(&mut self) {
         if let Some(dev) = self.device.as_ref() {
+            if let Ok(mut slot) = self.session_device_slot.lock() {
+                *slot = Some(dev.clone());
+            }
             dev.with(|d| {
                 let info = d.info();
                 self.system_specs.device_model =
@@ -2302,6 +2312,18 @@ impl RazerGuiApp {
             .unwrap_or(true)
     }
 
+    fn sync_repaint_wake(&self, ctx: &egui::Context) {
+        let tray_hidden = !self.is_window_visible();
+        let desired = if tray_hidden {
+            true
+        } else {
+            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+            let focused = ctx.input(|i| i.viewport().focused.unwrap_or(i.focused));
+            minimized || !focused
+        };
+        self.repaint_wake.set_desired(desired);
+    }
+
     fn hide_to_tray(&mut self) {
         if let Some(state) = self.tray_state.clone() {
             state.hide();
@@ -2310,8 +2332,7 @@ impl RazerGuiApp {
     }
 
     fn poll_while_hidden(&mut self, ctx: &egui::Context) {
-        ctx.request_repaint_after(std::time::Duration::from_secs(2));
-        self.unfocused_wake.set_active(true);
+        self.sync_repaint_wake(ctx);
         self.poll_slow.store(true, Ordering::Relaxed);
         self.maybe_sync_cooling_pad_enforce(3.0);
         if self.last_cooling_pad_pull_time.elapsed().as_secs_f32() >= 2.0 {
@@ -2349,6 +2370,8 @@ impl eframe::App for RazerGuiApp {
             return;
         }
 
+        self.sync_repaint_wake(ctx);
+
         let fast_repaint = !self.fully_initialized
             || self.brightness_slider_active
             || self.cooling_pad_brightness_slider_active
@@ -2374,12 +2397,7 @@ impl eframe::App for RazerGuiApp {
             self.last_cooling_pad_pull_time = std::time::Instant::now();
         }
 
-        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        let viewport_focused = ctx.input(|i| i.viewport().focused.unwrap_or(i.focused));
         let tray_hidden = !self.is_window_visible();
-        self.unfocused_wake
-            .set_active(minimized || !viewport_focused || tray_hidden);
-
         self.poll_brightness_skip
             .store(self.brightness_slider_active, Ordering::Relaxed);
         self.poll_slow.store(tray_hidden, Ordering::Relaxed);
@@ -2661,8 +2679,20 @@ fn main() -> Result<(), eframe::Error> {
                 tray::set_windows_taskbar_icon(hwnd);
             }
             let tray_guard = tray::TrayHandle::init(tray_icon, Arc::clone(&tray_state));
-            let unfocused_wake = ui_wake::RepaintWake::new(cc.egui_ctx.clone());
-            let mut app = RazerGuiApp::new(unfocused_wake);
+            let session_state = Arc::new(SessionState::default());
+            let session_device_slot = new_device_slot();
+            let repaint_wake = ui_wake::RepaintWake::new(
+                cc.egui_ctx.clone(),
+                Arc::clone(&session_state),
+            );
+            let mut app = RazerGuiApp::new(repaint_wake, session_device_slot.clone());
+            spawn_session_lock_monitor(
+                session_state,
+                cc.egui_ctx.clone(),
+                session_device_slot,
+                Arc::clone(&app.laptop_fan_cap),
+                Arc::clone(&app.cooling_pad_enforce.settings),
+            );
             #[cfg(windows)]
             {
                 let ctx = cc.egui_ctx.clone();

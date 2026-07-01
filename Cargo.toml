@@ -1,6 +1,6 @@
 [package]
 name = "r-helper"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 description = "R-Helper - Razer Blade control interface"
 authors = ["Fatalution"]
@@ -31,6 +31,7 @@ windows = { version = "0.62.0", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
+    "Win32_System_StationsAndDesktops",
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",

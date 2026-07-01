@@ -12,7 +12,6 @@ pub struct TraySharedState {
     hwnd: Mutex<Option<isize>>,
     visible: AtomicBool,
     ctx: eframe::egui::Context,
-    repaint_wake: Arc<crate::ui_wake::RepaintWake>,
 }
 
 impl TraySharedState {
@@ -20,7 +19,6 @@ impl TraySharedState {
         Arc::new(Self {
             hwnd: Mutex::new(None),
             visible: AtomicBool::new(true),
-            repaint_wake: crate::ui_wake::RepaintWake::new(ctx.clone()),
             ctx,
         })
     }
@@ -38,7 +36,6 @@ impl TraySharedState {
         if let Some(hwnd) = hwnd {
             show_window(hwnd);
             self.visible.store(true, Ordering::Relaxed);
-            self.repaint_wake.set_active(false);
             self.ctx.request_repaint();
         }
     }
@@ -48,7 +45,6 @@ impl TraySharedState {
         if let Some(hwnd) = hwnd {
             hide_window(hwnd);
             self.visible.store(false, Ordering::Relaxed);
-            self.repaint_wake.set_active(true);
         }
     }
 }

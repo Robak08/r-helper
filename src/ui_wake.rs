@@ -4,30 +4,34 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::session_lock::SessionState;
+
 const WAKE_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Background thread that calls `request_repaint` while active.
+/// Background thread that calls `request_repaint` while desired and session is unlocked.
 ///
 /// eframe/winit often stop driving the event loop for hidden or unfocused windows;
 /// this keeps `update()` running so polled state (temps, fan RPM, etc.) reaches the UI.
 pub struct RepaintWake {
     ctx: eframe::egui::Context,
-    active: AtomicBool,
+    session: Arc<SessionState>,
+    desired: AtomicBool,
     running: AtomicBool,
 }
 
 impl RepaintWake {
-    pub fn new(ctx: eframe::egui::Context) -> Arc<Self> {
+    pub fn new(ctx: eframe::egui::Context, session: Arc<SessionState>) -> Arc<Self> {
         Arc::new(Self {
             ctx,
-            active: AtomicBool::new(false),
+            session,
+            desired: AtomicBool::new(false),
             running: AtomicBool::new(false),
         })
     }
 
-    pub fn set_active(self: &Arc<Self>, active: bool) {
-        self.active.store(active, Ordering::Relaxed);
-        if active {
+    pub fn set_desired(self: &Arc<Self>, desired: bool) {
+        self.desired.store(desired, Ordering::Relaxed);
+        if desired {
             self.ensure_thread();
         }
     }
@@ -41,8 +45,10 @@ impl RepaintWake {
         std::thread::Builder::new()
             .name("ui-repaint-wake".into())
             .spawn(move || {
-                while wake.active.load(Ordering::Relaxed) {
-                    wake.ctx.request_repaint();
+                while wake.desired.load(Ordering::Relaxed) {
+                    if !wake.session.locked.load(Ordering::Relaxed) {
+                        wake.ctx.request_repaint();
+                    }
                     std::thread::sleep(WAKE_INTERVAL);
                 }
                 wake.running.store(false, Ordering::SeqCst);
