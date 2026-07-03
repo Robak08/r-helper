@@ -1,7 +1,7 @@
 use eframe::egui::{self, RichText, Vec2};
 
 use crate::ui::temp::info_temp_row;
-use librazer::enumerate::RazerDeviceSummary;
+use librazer::enumerate::{RazerDeviceKind, RazerDeviceSummary};
 use librazer::types::BatteryCare;
 
 const COMPACT_PROGRESS_WIDTH: f32 = 48.0;
@@ -193,17 +193,22 @@ fn render_razer_devices(ui: &mut egui::Ui, devices: &[RazerDeviceSummary]) {
                         }
                     }
 
-                    let status = match (device.battery_charging, device.battery_percent) {
-                        (Some(true), _) => "Charging",
-                        (_, Some(pct)) if pct <= 20 => "Low",
-                        (_, Some(_)) => "OK",
-                        _ => "Wired or unavailable",
-                    };
+                    let status = peripheral_status(device);
                     ui.label(status);
                     ui.end_row();
                 }
             });
     });
+}
+
+fn peripheral_status(device: &RazerDeviceSummary) -> &'static str {
+    match (device.battery_charging, device.battery_percent) {
+        (Some(true), _) => "Charging",
+        (_, Some(pct)) if pct <= 20 => "Low",
+        (_, Some(_)) => "OK",
+        _ if device.kind == RazerDeviceKind::Headset => "Unavailable",
+        _ => "Wired or unavailable",
+    }
 }
 
 fn compact_progress_bar(ui: &mut egui::Ui, pct: u8) {

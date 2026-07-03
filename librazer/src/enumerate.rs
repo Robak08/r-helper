@@ -1,5 +1,9 @@
 use crate::chroma::probe_peripheral_battery;
 use crate::cooling_pad::COOLING_PAD_PID;
+use crate::headset::{
+    device_protocol, hid_debug, is_modern_headset_pid, ranked_entries_for_pid, DeviceProtocol,
+    HeadsetBatteryManager,
+};
 use crate::profile::lookup_profile;
 
 use anyhow::{Context, Result};
@@ -23,6 +27,7 @@ pub struct RazerHidEntry {
 pub enum RazerDeviceKind {
     BladeLaptop,
     CoolingPad,
+    Headset,
     Peripheral,
 }
 
@@ -31,6 +36,8 @@ fn device_kind(pid: u16) -> RazerDeviceKind {
         RazerDeviceKind::BladeLaptop
     } else if pid == COOLING_PAD_PID {
         RazerDeviceKind::CoolingPad
+    } else if is_modern_headset_pid(pid) {
+        RazerDeviceKind::Headset
     } else {
         RazerDeviceKind::Peripheral
     }
@@ -108,27 +115,76 @@ pub fn summarize_razer_devices(entries: &[RazerHidEntry]) -> Vec<RazerDeviceSumm
 pub fn summarize_peripheral_devices(entries: &[RazerHidEntry]) -> Vec<RazerDeviceSummary> {
     summarize_razer_devices(entries)
         .into_iter()
-        .filter(|s| s.kind == RazerDeviceKind::Peripheral)
+        .filter(|s| matches!(s.kind, RazerDeviceKind::Peripheral | RazerDeviceKind::Headset))
         .collect()
 }
 
-/// Query wireless peripheral battery levels (best-effort; wired devices typically fail).
-pub fn enrich_peripheral_batteries(entries: &[RazerHidEntry], summaries: &mut [RazerDeviceSummary]) {
+/// Query peripheral battery levels (Chroma mice/keyboards + modern headsets).
+pub fn enrich_peripheral_batteries(
+    entries: &[RazerHidEntry],
+    summaries: &mut [RazerDeviceSummary],
+    headset_manager: &mut HeadsetBatteryManager,
+) {
+    headset_manager.tick(entries);
+
     for summary in summaries.iter_mut() {
-        if summary.kind == RazerDeviceKind::BladeLaptop || summary.kind == RazerDeviceKind::CoolingPad {
+        if matches!(
+            summary.kind,
+            RazerDeviceKind::BladeLaptop | RazerDeviceKind::CoolingPad
+        ) {
             continue;
         }
 
-        let Some(entry) = entries.iter().find(|e| e.pid == summary.pid) else {
-            continue;
+        let battery = match device_protocol(summary.pid) {
+            DeviceProtocol::HeadsetModern => headset_manager.battery_for_pid(summary.pid),
+            DeviceProtocol::Chroma => probe_chroma_battery(entries, summary.pid),
         };
 
-        if let Some(battery) = probe_peripheral_battery(entry) {
+        if let Some(battery) = battery {
             summary.battery_percent = Some(battery.percent);
             summary.battery_charging = Some(battery.charging);
             summary.battery_available = true;
+        } else {
+            log_failed_battery_probe(entries, summary.pid);
         }
     }
+}
+
+fn probe_chroma_battery(
+    entries: &[RazerHidEntry],
+    pid: u16,
+) -> Option<crate::chroma::PeripheralBattery> {
+    for entry in ranked_entries_for_pid(entries, pid) {
+        if let Some(battery) = probe_peripheral_battery(entry) {
+            return Some(battery);
+        }
+    }
+    None
+}
+
+fn log_failed_battery_probe(entries: &[RazerHidEntry], pid: u16) {
+    let interfaces: Vec<String> = entries
+        .iter()
+        .filter(|e| e.pid == pid)
+        .map(|e| {
+            format!(
+                "if{} usage_page=0x{:04x} usage=0x{:04x} path={}",
+                e.interface_number,
+                e.usage_page,
+                e.usage,
+                e.path.to_string_lossy()
+            )
+        })
+        .collect();
+
+    if interfaces.is_empty() {
+        return;
+    }
+
+    hid_debug(format!(
+        "Battery probe failed for PID 0x{pid:04x} ({})",
+        interfaces.join("; ")
+    ));
 }
 
 fn best_name(entry: &RazerHidEntry) -> String {
@@ -181,6 +237,24 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].pid, 0x00a6);
         assert_eq!(summaries[0].kind, RazerDeviceKind::Peripheral);
+    }
+
+    #[test]
+    fn blackshark_v3_classified_as_headset() {
+        let entries = vec![RazerHidEntry {
+            vid: RAZER_VID,
+            pid: 0x057a,
+            product_string: Some("BlackShark V3".into()),
+            manufacturer_string: None,
+            path: CString::new("/hs").unwrap(),
+            interface_number: 0,
+            usage_page: 0xFF14,
+            usage: 0,
+        }];
+
+        let summaries = summarize_peripheral_devices(&entries);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].kind, RazerDeviceKind::Headset);
     }
 
     #[test]
