@@ -112,6 +112,7 @@ struct RazerGuiApp {
     last_fan_enforce_time: std::time::Instant,
     last_fan_reconcile_time: std::time::Instant,
     last_cooling_pad_pull_time: std::time::Instant,
+    last_cooling_pad_manual_enforce_time: std::time::Instant,
     status_messages: bool,
 
     manual_fan_rpm: u16,
@@ -191,6 +192,7 @@ struct RazerGuiApp {
     last_cooling_pad_sync_time: std::time::Instant,
     repaint_wake: Arc<ui_wake::RepaintWake>,
     session_device_slot: DeviceSlot,
+    session_state: Arc<SessionState>,
 }
 
 impl RazerGuiApp {
@@ -263,10 +265,13 @@ impl RazerGuiApp {
     }
 
     fn sync_cooling_pad_enforce(&mut self) {
+        let session_locked = self.session_state.locked.load(Ordering::Relaxed);
         if let Ok(mut settings) = self.cooling_pad_enforce.settings.lock() {
             settings.active = self.cooling_pad.is_some();
             settings.fully_initialized = self.fully_initialized && !self.loading;
-            settings.fan_mode = self.cooling_pad_fan_mode;
+            if !session_locked {
+                settings.fan_mode = self.cooling_pad_fan_mode;
+            }
             settings.manual_rpm = self.cooling_pad_manual_rpm;
             settings.auto_min_rpm = self.cooling_pad_auto_min_rpm;
             settings.auto_max_rpm = self.cooling_pad_auto_max_rpm;
@@ -361,6 +366,7 @@ impl RazerGuiApp {
     fn new(
         repaint_wake: Arc<ui_wake::RepaintWake>,
         session_device_slot: DeviceSlot,
+        session_state: Arc<SessionState>,
     ) -> Self {
         let app_config = config::AppConfig::load();
         let ac_profile = app_config.ac_profile;
@@ -402,6 +408,7 @@ impl RazerGuiApp {
             last_fan_enforce_time: std::time::Instant::now(),
             last_fan_reconcile_time: std::time::Instant::now(),
             last_cooling_pad_pull_time: std::time::Instant::now(),
+            last_cooling_pad_manual_enforce_time: std::time::Instant::now(),
             status_messages,
 
             manual_fan_rpm: 2000,
@@ -486,6 +493,7 @@ impl RazerGuiApp {
             last_cooling_pad_sync_time: now,
             repaint_wake,
             session_device_slot,
+            session_state,
         };
 
         app.apply_cooling_pad_runtime(cooling_pad_cfg);
@@ -914,9 +922,21 @@ impl RazerGuiApp {
     }
 
     fn schedule_cooling_pad_redetect(&mut self) {
-        if self.cooling_pad_usb_present && self.cooling_pad.is_none() {
-            self.try_attach_cooling_pad();
+        self.redetect_cooling_pad();
+    }
+
+    fn redetect_cooling_pad(&mut self) {
+        if !self.cooling_pad_usb_present {
+            return;
         }
+        if self.cooling_pad.is_some() {
+            self.cooling_pad_poller_running.store(false, Ordering::Relaxed);
+            self.cooling_pad_poll_receiver = None;
+            self.cooling_pad = None;
+            self.cooling_pad_chroma_available = false;
+            self.sync_cooling_pad_enforce();
+        }
+        self.try_attach_cooling_pad();
     }
 
     fn detach_cooling_pad(&mut self) {
@@ -1649,6 +1669,58 @@ impl RazerGuiApp {
         }
     }
 
+    fn enforce_cooling_pad_manual_fan(&mut self) {
+        if self.cooling_pad_fan_mode != CoolingPadFanMode::Manual {
+            return;
+        }
+        if let Some(pad) = self.cooling_pad.as_ref() {
+            let rpm = self.cooling_pad_manual_rpm;
+            match pad.with(|p| p.set_fan_rpm(rpm)) {
+                Some(Ok(())) => {
+                    self.last_cooling_pad_fan_enforce_time = std::time::Instant::now();
+                    self.last_cooling_pad_manual_enforce_time = std::time::Instant::now();
+                }
+                Some(Err(_)) | None => {
+                    self.redetect_cooling_pad();
+                }
+            }
+        }
+    }
+
+    fn process_cooling_pad_enforce_flags(&mut self) {
+        if self
+            .cooling_pad_enforce
+            .pending_cooling_pad_restore
+            .swap(false, Ordering::Relaxed)
+            && self.cooling_pad.is_some()
+            && self.cooling_pad_fan_mode == CoolingPadFanMode::Manual
+        {
+            self.apply_cooling_pad_manual_fan(self.cooling_pad_manual_rpm);
+        }
+
+        if self
+            .cooling_pad_enforce
+            .needs_redetect
+            .swap(false, Ordering::Relaxed)
+        {
+            self.redetect_cooling_pad();
+        }
+    }
+
+    fn run_cooling_pad_fan_enforcement(&mut self) {
+        if !self.fully_initialized || self.loading || self.cooling_pad.is_none() {
+            return;
+        }
+
+        self.process_cooling_pad_enforce_flags();
+
+        if self.cooling_pad_fan_mode == CoolingPadFanMode::Manual
+            && self.last_cooling_pad_manual_enforce_time.elapsed().as_secs_f32() >= 1.0
+        {
+            self.enforce_cooling_pad_manual_fan();
+        }
+    }
+
     fn apply_cooling_pad_manual_fan(&mut self, rpm: u16) {
         let Some(pad) = self.cooling_pad.as_ref() else {
             return;
@@ -1656,9 +1728,10 @@ impl RazerGuiApp {
         match pad.with(|p| p.set_fan_rpm(rpm)) {
             Some(Ok(())) => {
                 self.last_cooling_pad_fan_enforce_time = std::time::Instant::now();
+                self.last_cooling_pad_manual_enforce_time = std::time::Instant::now();
             }
             Some(Err(_)) | None => {
-                self.schedule_cooling_pad_redetect();
+                self.redetect_cooling_pad();
             }
         }
     }
@@ -1677,7 +1750,7 @@ impl RazerGuiApp {
                 self.sync_cooling_pad_enforce_auto_state();
             }
             Some(Err(_)) | None => {
-                self.schedule_cooling_pad_redetect();
+                self.redetect_cooling_pad();
             }
         }
     }
@@ -1704,6 +1777,8 @@ impl RazerGuiApp {
     }
 
     fn run_fan_enforcement(&mut self) {
+        self.run_cooling_pad_fan_enforcement();
+
         if self.fully_initialized && self.device.is_some() && !self.loading {
             self.sync_laptop_fan_cap();
             if self.last_fan_reconcile_time.elapsed().as_secs_f32() >= 3.0 {
@@ -2685,13 +2760,18 @@ fn main() -> Result<(), eframe::Error> {
                 cc.egui_ctx.clone(),
                 Arc::clone(&session_state),
             );
-            let mut app = RazerGuiApp::new(repaint_wake, session_device_slot.clone());
+            let mut app = RazerGuiApp::new(
+                repaint_wake,
+                session_device_slot.clone(),
+                Arc::clone(&session_state),
+            );
             spawn_session_lock_monitor(
                 session_state,
                 cc.egui_ctx.clone(),
                 session_device_slot,
                 Arc::clone(&app.laptop_fan_cap),
                 Arc::clone(&app.cooling_pad_enforce.settings),
+                Arc::clone(&app.cooling_pad_enforce.pending_cooling_pad_restore),
             );
             #[cfg(windows)]
             {

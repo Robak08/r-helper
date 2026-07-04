@@ -95,6 +95,7 @@ pub fn spawn_session_lock_monitor(
     device_slot: DeviceSlot,
     laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
     cooling_pad_settings: Arc<Mutex<CoolingPadEnforceShared>>,
+    pending_cooling_pad_restore: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
         .name("session-lock-monitor".into())
@@ -134,6 +135,7 @@ pub fn spawn_session_lock_monitor(
                             dev,
                             &laptop_fan_cap,
                             &cooling_pad_settings,
+                            &pending_cooling_pad_restore,
                             &mut snapshots,
                         );
                     } else {
@@ -213,6 +215,7 @@ fn restore_unlock_state(
     device: &SharedDevice,
     laptop_fan_cap: &Arc<Mutex<LaptopFanCapShared>>,
     cooling_pad_settings: &Arc<Mutex<CoolingPadEnforceShared>>,
+    pending_cooling_pad_restore: &Arc<AtomicBool>,
     snapshots: &mut SessionSnapshots,
 ) {
     if let Some(rpm) = snapshots.cooling_pad_manual_rpm.take() {
@@ -220,6 +223,7 @@ fn restore_unlock_state(
             settings.fan_mode = CoolingPadFanMode::Manual;
             settings.manual_rpm = rpm;
         }
+        pending_cooling_pad_restore.store(true, Ordering::Relaxed);
     }
 
     if let Some(rpm) = snapshots.laptop_manual_rpm.take() {
