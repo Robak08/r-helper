@@ -1,7 +1,13 @@
-use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::Sender,
+    Arc,
+};
+use std::time::{Duration, Instant};
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(10);
+const BATTERY_CACHE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BluetoothHeadsetSummary {
@@ -10,48 +16,59 @@ pub struct BluetoothHeadsetSummary {
     pub battery_percent: Option<u8>,
 }
 
-pub fn spawn_bluetooth_headset_poller(tx: Sender<Vec<BluetoothHeadsetSummary>>) {
+pub fn spawn_bluetooth_headset_poller(
+    tx: Sender<Vec<BluetoothHeadsetSummary>>,
+    running: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
-        #[cfg(windows)]
-        let Some(_winrt_apartment) = WinRtApartment::initialize() else {
-            let _ = tx.send(Vec::new());
-            return;
-        };
+        let mut cached_batteries = HashMap::new();
+        let mut last_battery_refresh =
+            Instant::now().checked_sub(BATTERY_CACHE_INTERVAL).unwrap_or_else(Instant::now);
 
-        loop {
-            let headsets = enumerate_connected_bluetooth_headsets();
+        while running.load(Ordering::Relaxed) {
+            if last_battery_refresh.elapsed() >= BATTERY_CACHE_INTERVAL {
+                cached_batteries = collect_pnp_bluetooth_batteries();
+                last_battery_refresh = Instant::now();
+            }
+
+            let headsets = enumerate_pnp_bluetooth_headphones(&cached_batteries);
             if tx.send(headsets).is_err() {
                 break;
             }
-            std::thread::sleep(REFRESH_INTERVAL);
+
+            std::thread::sleep(PRESENCE_INTERVAL);
         }
     });
 }
 
-#[cfg(windows)]
-struct WinRtApartment;
-
-#[cfg(windows)]
-impl WinRtApartment {
-    fn initialize() -> Option<Self> {
-        use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-
-        // This poller owns its thread, so it also owns the WinRT apartment lifecycle.
-        unsafe { RoInitialize(RO_INIT_MULTITHREADED).ok().map(|_| Self) }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WinRtApartment {
-    fn drop(&mut self) {
-        unsafe { windows::Win32::System::WinRT::RoUninitialize() };
-    }
+#[cfg(not(windows))]
+fn enumerate_pnp_bluetooth_headphones(
+    _batteries: &HashMap<String, u8>,
+) -> Vec<BluetoothHeadsetSummary> {
+    Vec::new()
 }
 
 #[cfg(not(windows))]
-fn enumerate_connected_bluetooth_headsets() -> Vec<BluetoothHeadsetSummary> {
-    Vec::new()
+fn collect_pnp_bluetooth_batteries() -> HashMap<String, u8> {
+    HashMap::new()
 }
+
+#[cfg(windows)]
+const BLUETOOTH_DEVICE_CLASS: windows::core::GUID =
+    windows::core::GUID::from_u128(0xe0cbf06c_cd8b_4647_bb8a_263b43f0f974);
+#[cfg(windows)]
+const MEDIA_DEVICE_CLASS: windows::core::GUID =
+    windows::core::GUID::from_u128(0x4d36e96c_e325_11ce_bfc1_08002be10318);
+#[cfg(windows)]
+const SYSTEM_DEVICE_CLASS: windows::core::GUID =
+    windows::core::GUID::from_u128(0x4d36e97d_e325_11ce_bfc1_08002be10318);
+
+#[cfg(windows)]
+const SCOPED_DEVICE_CLASSES: &[windows::core::GUID] = &[
+    BLUETOOTH_DEVICE_CLASS,
+    MEDIA_DEVICE_CLASS,
+    SYSTEM_DEVICE_CLASS,
+];
 
 #[cfg(windows)]
 fn bluetooth_battery_property_key() -> windows::Win32::Foundation::DEVPROPKEY {
@@ -62,116 +79,124 @@ fn bluetooth_battery_property_key() -> windows::Win32::Foundation::DEVPROPKEY {
 }
 
 #[cfg(windows)]
-fn enumerate_connected_bluetooth_headsets() -> Vec<BluetoothHeadsetSummary> {
-    use windows::Devices::Bluetooth::{
-        BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice, BluetoothMajorClass,
-    };
-    use windows::Devices::Enumeration::DeviceInformation;
+const BDIF_CONNECTED: u32 = 0x0000_0020;
 
+#[cfg(windows)]
+fn bluetooth_device_flags_property_key() -> windows::Win32::Foundation::DEVPROPKEY {
+    windows::Win32::Foundation::DEVPROPKEY {
+        fmtid: windows::core::GUID::from_u128(0x2bd67d8b_8beb_48d5_87e0_6cda3428040a),
+        pid: 3,
+    }
+}
+
+#[cfg(windows)]
+const DISCOVERY_DEVICE_CLASSES: &[windows::core::GUID] = &[BLUETOOTH_DEVICE_CLASS];
+
+#[cfg(windows)]
+fn enumerate_pnp_bluetooth_headphones(
+    pnp_batteries: &HashMap<String, u8>,
+) -> Vec<BluetoothHeadsetSummary> {
     let mut headsets = Vec::new();
-    let pnp_batteries = collect_pnp_bluetooth_batteries();
+    let mut connected_keys = std::collections::HashSet::new();
 
-    if let Ok(selector) =
-        BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected)
-    {
-        if let Ok(operation) = DeviceInformation::FindAllAsyncAqsFilter(&selector) {
-            if let Ok(devices) = operation.join() {
-                for index in 0..devices.Size().unwrap_or(0) {
-                    let Ok(info) = devices.GetAt(index) else {
-                        continue;
-                    };
-                    let Ok(name) = info.Name().map(|value| value.to_string()) else {
-                        continue;
-                    };
+    collect_connected_media_headphones(&mut headsets, &mut connected_keys);
 
-                    let Ok(id) = info.Id() else {
-                        continue;
-                    };
-                    let Ok(operation) = BluetoothDevice::FromIdAsync(&id) else {
-                        continue;
-                    };
-                    let Ok(device) = operation.join() else {
-                        continue;
-                    };
-                    let Ok(class) = device.ClassOfDevice() else {
-                        continue;
-                    };
-                    let Ok(major) = class.MajorClass() else {
-                        continue;
-                    };
-                    let Ok(minor) = class.MinorClass() else {
-                        continue;
-                    };
-                    if major != BluetoothMajorClass::AudioVideo
-                        || !is_headphone_class(major.0, minor.0)
-                    {
-                        continue;
-                    }
-
-                    let battery_percent = lookup_pnp_battery(&name, &pnp_batteries);
-                    merge_headset(
-                        &mut headsets,
-                        BluetoothHeadsetSummary {
-                            id: id.to_string(),
-                            name,
-                            battery_percent,
-                        },
-                    );
-                }
-            }
+    for class in DISCOVERY_DEVICE_CLASSES {
+        unsafe {
+            let Ok(device_info) = enumerate_present_devices_for_class(class) else {
+                continue;
+            };
+            collect_pnp_headphones_from_set(device_info, *class, &mut headsets, &mut connected_keys);
+            let _ = windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiDestroyDeviceInfoList(
+                device_info,
+            );
         }
     }
 
-    if let Ok(selector) = BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(
-        BluetoothConnectionStatus::Connected,
-    ) {
-        if let Ok(operation) = DeviceInformation::FindAllAsyncAqsFilter(&selector) {
-            if let Ok(devices) = operation.join() {
-                for index in 0..devices.Size().unwrap_or(0) {
-                    let Ok(info) = devices.GetAt(index) else {
-                        continue;
-                    };
-                    let Ok(name) = info.Name().map(|value| value.to_string()) else {
-                        continue;
-                    };
-
-                    let key = normalized_device_name(&name);
-                    let matches_classic =
-                        headsets.iter().any(|headset| normalized_device_name(&headset.name) == key);
-                    if !matches_classic && !looks_like_headphone_name(&name) {
-                        continue;
-                    }
-
-                    let Ok(id) = info.Id() else {
-                        continue;
-                    };
-                    let Ok(operation) = BluetoothLEDevice::FromIdAsync(&id) else {
-                        continue;
-                    };
-                    let Ok(device) = operation.join() else {
-                        continue;
-                    };
-                    let battery_percent = read_standard_battery_level(&device)
-                        .or_else(|| lookup_pnp_battery(&name, &pnp_batteries));
-
-                    merge_headset(
-                        &mut headsets,
-                        BluetoothHeadsetSummary { id: id.to_string(), name, battery_percent },
-                    );
-                }
-            }
-        }
-    }
-
-    enrich_batteries_from_windows(&mut headsets, &pnp_batteries);
+    enrich_batteries_from_windows(&mut headsets, pnp_batteries);
+    headsets.retain(|headset| {
+        connected_keys.contains(&normalized_device_name(&headset.name))
+    });
     headsets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     headsets
 }
 
 #[cfg(windows)]
+fn collect_connected_media_headphones(
+    headsets: &mut Vec<BluetoothHeadsetSummary>,
+    connected_keys: &mut std::collections::HashSet<String>,
+) {
+    unsafe {
+        let Ok(device_info) = enumerate_present_devices_for_class(&MEDIA_DEVICE_CLASS) else {
+            return;
+        };
+        collect_media_headphones_from_set(device_info, headsets, connected_keys);
+        let _ = windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiDestroyDeviceInfoList(
+            device_info,
+        );
+    }
+}
+
+#[cfg(windows)]
+unsafe fn collect_media_headphones_from_set(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    headsets: &mut Vec<BluetoothHeadsetSummary>,
+    connected_keys: &mut std::collections::HashSet<String>,
+) {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiEnumDeviceInfo, SP_DEVINFO_DATA,
+    };
+
+    let mut device_data = SP_DEVINFO_DATA {
+        cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+        ..Default::default()
+    };
+    let mut index = 0u32;
+
+    while unsafe { SetupDiEnumDeviceInfo(device_info, index, &mut device_data).is_ok() } {
+        index += 1;
+        let Some(name) = (unsafe { read_pnp_device_name(device_info, &device_data) }) else {
+            continue;
+        };
+        let Some(device_name) = media_headphone_device_name(&name) else {
+            continue;
+        };
+        if is_excluded_device_name(&device_name) {
+            continue;
+        }
+
+        let id = unsafe { read_pnp_instance_id(device_info, &device_data) }
+            .unwrap_or_else(|| name.clone());
+        connected_keys.insert(normalized_device_name(&device_name));
+
+        merge_headset(
+            headsets,
+            BluetoothHeadsetSummary {
+                id,
+                name: device_name,
+                battery_percent: None,
+            },
+        );
+    }
+}
+
+#[cfg(windows)]
+unsafe fn enumerate_present_devices_for_class(
+    class: &windows::core::GUID,
+) -> windows::core::Result<
+    windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiGetClassDevsW, DIGCF_PRESENT,
+    };
+
+    unsafe { SetupDiGetClassDevsW(Some(class), None, None, DIGCF_PRESENT) }
+}
+
+#[cfg(windows)]
 fn enrich_batteries_from_windows(
     headsets: &mut [BluetoothHeadsetSummary],
-    pnp_batteries: &std::collections::HashMap<String, u8>,
+    pnp_batteries: &HashMap<String, u8>,
 ) {
     for headset in headsets.iter_mut() {
         if headset.battery_percent.is_none() {
@@ -181,24 +206,19 @@ fn enrich_batteries_from_windows(
 }
 
 #[cfg(windows)]
-fn collect_pnp_bluetooth_batteries() -> std::collections::HashMap<String, u8> {
-    use std::collections::HashMap;
-
-    use windows::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiGetClassDevsW, DIGCF_ALLCLASSES, DIGCF_PRESENT,
-    };
-
+fn collect_pnp_bluetooth_batteries() -> HashMap<String, u8> {
     let mut batteries = HashMap::new();
 
-    unsafe {
-        let Ok(device_info) =
-            SetupDiGetClassDevsW(None, None, None, DIGCF_PRESENT | DIGCF_ALLCLASSES)
-        else {
-            return batteries;
-        };
-
-        collect_pnp_batteries_from_set(device_info, &mut batteries);
-        let _ = SetupDiDestroyDeviceInfoList(device_info);
+    for class in SCOPED_DEVICE_CLASSES {
+        unsafe {
+            let Ok(device_info) = enumerate_present_devices_for_class(class) else {
+                continue;
+            };
+            collect_pnp_batteries_from_set(device_info, &mut batteries);
+            let _ = windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiDestroyDeviceInfoList(
+                device_info,
+            );
+        }
     }
 
     batteries
@@ -207,7 +227,7 @@ fn collect_pnp_bluetooth_batteries() -> std::collections::HashMap<String, u8> {
 #[cfg(windows)]
 unsafe fn collect_pnp_batteries_from_set(
     device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
-    batteries: &mut std::collections::HashMap<String, u8>,
+    batteries: &mut HashMap<String, u8>,
 ) {
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         SetupDiEnumDeviceInfo, SP_DEVINFO_DATA,
@@ -222,12 +242,12 @@ unsafe fn collect_pnp_batteries_from_set(
 
     while unsafe { SetupDiEnumDeviceInfo(device_info, index, &mut device_data).is_ok() } {
         index += 1;
-        let Some(name) = (unsafe { read_pnp_device_name(device_info, &device_data) }) else {
-            continue;
-        };
         let Some(percent) = (unsafe {
             read_pnp_battery_percent(device_info, &device_data, property_key)
         }) else {
+            continue;
+        };
+        let Some(name) = (unsafe { read_pnp_device_name(device_info, &device_data) }) else {
             continue;
         };
 
@@ -237,6 +257,159 @@ unsafe fn collect_pnp_batteries_from_set(
         }
         batteries.insert(key, percent);
     }
+}
+
+#[cfg(windows)]
+unsafe fn collect_pnp_headphones_from_set(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_class: windows::core::GUID,
+    headsets: &mut Vec<BluetoothHeadsetSummary>,
+    connected_keys: &mut std::collections::HashSet<String>,
+) {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiEnumDeviceInfo, SP_DEVINFO_DATA,
+    };
+
+    let mut device_data = SP_DEVINFO_DATA {
+        cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+        ..Default::default()
+    };
+    let mut index = 0u32;
+
+    while unsafe { SetupDiEnumDeviceInfo(device_info, index, &mut device_data).is_ok() } {
+        index += 1;
+        if device_class == BLUETOOTH_DEVICE_CLASS
+            && !unsafe { is_pnp_bluetooth_connected(device_info, &device_data) }
+        {
+            continue;
+        }
+        if !unsafe { is_pnp_headphone_candidate(device_info, &device_data, &device_class) } {
+            continue;
+        }
+
+        let Some(name) = (unsafe { read_pnp_device_name(device_info, &device_data) }) else {
+            continue;
+        };
+        if is_excluded_device_name(&name) || is_transport_endpoint_name(&name) {
+            continue;
+        }
+
+        let id = unsafe { read_pnp_instance_id(device_info, &device_data) }
+            .unwrap_or_else(|| name.clone());
+        connected_keys.insert(normalized_device_name(&name));
+
+        merge_headset(
+            headsets,
+            BluetoothHeadsetSummary {
+                id,
+                name,
+                battery_percent: None,
+            },
+        );
+    }
+}
+
+#[cfg(windows)]
+unsafe fn is_pnp_bluetooth_connected(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+) -> bool {
+    let Some(flags) = (unsafe { read_pnp_bluetooth_device_flags(device_info, device_data) }) else {
+        return false;
+    };
+    flags & BDIF_CONNECTED != 0
+}
+
+#[cfg(windows)]
+unsafe fn read_pnp_bluetooth_device_flags(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+) -> Option<u32> {
+    let property_key = bluetooth_device_flags_property_key();
+    unsafe { read_pnp_uint32_property(device_info, device_data, &property_key) }
+}
+
+#[cfg(windows)]
+unsafe fn is_pnp_headphone_candidate(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    device_class: &windows::core::GUID,
+) -> bool {
+    if *device_class == SYSTEM_DEVICE_CLASS {
+        return false;
+    }
+
+    if let Some(class_of_device) =
+        unsafe { read_pnp_bluetooth_class_of_device(device_info, device_data) }
+    {
+        let major = ((class_of_device >> 8) & 0x1F) as i32;
+        let minor = ((class_of_device >> 2) & 0x3F) as i32;
+        if major == 4 && is_headphone_class(major, minor) {
+            return true;
+        }
+        if major == 4 && !is_headphone_class(major, minor) {
+            return false;
+        }
+    }
+
+    if let Some(category) =
+        unsafe { read_pnp_container_category(device_info, device_data) }
+    {
+        let lower = category.to_ascii_lowercase();
+        if lower.contains("headset.bluetooth")
+            || lower.contains("headphone")
+            || lower.contains("earbud")
+        {
+            return true;
+        }
+    }
+
+    let Some(name) = (unsafe { read_pnp_device_name(device_info, device_data) }) else {
+        return false;
+    };
+
+    if *device_class == MEDIA_DEVICE_CLASS {
+        return is_media_headphone_endpoint_name(&name);
+    }
+
+    looks_like_bluetooth_headphone_name(&name)
+}
+
+#[cfg(windows)]
+fn bluetooth_class_of_device_property_key() -> windows::Win32::Foundation::DEVPROPKEY {
+    windows::Win32::Foundation::DEVPROPKEY {
+        fmtid: windows::core::GUID::from_u128(0x2bd67d8b_8beb_48d5_87e0_6cda3428040a),
+        pid: 10,
+    }
+}
+
+#[cfg(windows)]
+unsafe fn read_pnp_bluetooth_class_of_device(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+) -> Option<u32> {
+    let property_key = bluetooth_class_of_device_property_key();
+    unsafe { read_pnp_uint32_property(device_info, device_data, &property_key) }
+}
+
+#[cfg(windows)]
+unsafe fn read_pnp_container_category(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+) -> Option<String> {
+    use windows::Win32::Devices::Properties::DEVPKEY_DeviceContainer_Category;
+
+    unsafe { read_pnp_string_property(device_info, device_data, &DEVPKEY_DeviceContainer_Category) }
+}
+
+#[cfg(windows)]
+unsafe fn read_pnp_instance_id(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+) -> Option<String> {
+    use windows::Win32::Devices::Properties::DEVPKEY_Device_InstanceId;
+
+    unsafe { read_pnp_string_property(device_info, device_data, &DEVPKEY_Device_InstanceId) }
 }
 
 #[cfg(windows)]
@@ -286,6 +459,38 @@ unsafe fn read_pnp_battery_percent(
 }
 
 #[cfg(windows)]
+unsafe fn read_pnp_uint32_property(
+    device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    property_key: &windows::Win32::Foundation::DEVPROPKEY,
+) -> Option<u32> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
+    use windows::Win32::Devices::Properties::{DEVPROP_TYPE_UINT32, DEVPROPTYPE};
+
+    let mut property_type = DEVPROPTYPE::default();
+    let mut buffer = [0u8; 4];
+    let mut required_size = 0u32;
+
+    unsafe {
+        SetupDiGetDevicePropertyW(
+            device_info,
+            device_data,
+            property_key,
+            &mut property_type,
+            Some(&mut buffer),
+            Some(&mut required_size),
+            0,
+        )
+        .ok()?;
+    }
+
+    match property_type {
+        DEVPROP_TYPE_UINT32 if required_size >= 4 => Some(u32::from_le_bytes(buffer)),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
 unsafe fn read_pnp_string_property(
     device_info: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
     device_data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
@@ -325,7 +530,7 @@ fn decode_utf16_property(buffer: &[u8], byte_len: usize) -> Option<String> {
     String::from_utf16(&wide).ok()
 }
 
-fn lookup_pnp_battery(name: &str, batteries: &std::collections::HashMap<String, u8>) -> Option<u8> {
+fn lookup_pnp_battery(name: &str, batteries: &HashMap<String, u8>) -> Option<u8> {
     let key = normalized_device_name(name);
     if key.is_empty() {
         return None;
@@ -345,50 +550,6 @@ fn pnp_names_relate(left: &str, right: &str) -> bool {
         || (right.len() >= 6 && left.starts_with(right))
 }
 
-#[cfg(windows)]
-fn read_standard_battery_level(
-    device: &windows::Devices::Bluetooth::BluetoothLEDevice,
-) -> Option<u8> {
-    use windows::Devices::Bluetooth::GenericAttributeProfile::{
-        GattCharacteristicUuids, GattCommunicationStatus, GattServiceUuids,
-    };
-    use windows::Storage::Streams::DataReader;
-
-    let battery_service = GattServiceUuids::Battery().ok()?;
-    let result = device.GetGattServicesForUuidAsync(battery_service).ok()?.join().ok()?;
-    if result.Status().ok()? != GattCommunicationStatus::Success {
-        return None;
-    }
-
-    let services = result.Services().ok()?;
-    let battery_characteristic = GattCharacteristicUuids::BatteryLevel().ok()?;
-    for index in 0..services.Size().ok()? {
-        let service = services.GetAt(index).ok()?;
-        let result =
-            service.GetCharacteristicsForUuidAsync(battery_characteristic).ok()?.join().ok()?;
-        if result.Status().ok()? != GattCommunicationStatus::Success {
-            continue;
-        }
-
-        let characteristics = result.Characteristics().ok()?;
-        for characteristic_index in 0..characteristics.Size().ok()? {
-            let characteristic = characteristics.GetAt(characteristic_index).ok()?;
-            let result = characteristic.ReadValueAsync().ok()?.join().ok()?;
-            if result.Status().ok()? != GattCommunicationStatus::Success {
-                continue;
-            }
-
-            let reader = DataReader::FromBuffer(&result.Value().ok()?).ok()?;
-            if reader.UnconsumedBufferLength().ok()? == 0 {
-                continue;
-            }
-            return Some(clamp_battery_percent(reader.ReadByte().ok()?));
-        }
-    }
-
-    None
-}
-
 fn merge_headset(headsets: &mut Vec<BluetoothHeadsetSummary>, incoming: BluetoothHeadsetSummary) {
     let incoming_key = normalized_device_name(&incoming.name);
     if let Some(existing) =
@@ -397,15 +558,45 @@ fn merge_headset(headsets: &mut Vec<BluetoothHeadsetSummary>, incoming: Bluetoot
         if incoming.battery_percent.is_some() {
             existing.battery_percent = incoming.battery_percent;
         }
-        if incoming.name.len() > existing.name.len() {
-            existing.name = incoming.name;
+        existing.name = prefer_display_name(&existing.name, &incoming.name);
+        if existing.id.is_empty() {
+            existing.id = incoming.id;
         }
         return;
     }
     headsets.push(incoming);
 }
 
-fn looks_like_headphone_name(name: &str) -> bool {
+fn prefer_display_name(current: &str, incoming: &str) -> String {
+    let current_rank = display_name_rank(current);
+    let incoming_rank = display_name_rank(incoming);
+    if incoming_rank < current_rank
+        || (incoming_rank == current_rank && incoming.len() < current.len())
+    {
+        incoming.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
+fn display_name_rank(name: &str) -> u32 {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("hands-free") || lower.contains("hands free") {
+        return 4;
+    }
+    if lower.contains("avrcp") {
+        return 4;
+    }
+    if lower.contains("stereo") && !lower.contains("bt") {
+        return 3;
+    }
+    if lower.starts_with("headphones (") || lower.starts_with("headset (") {
+        return 2;
+    }
+    0
+}
+
+fn looks_like_bluetooth_headphone_name(name: &str) -> bool {
     const HEADPHONE_TERMS: &[&str] = &[
         "headset",
         "headphone",
@@ -418,15 +609,82 @@ fn looks_like_headphone_name(name: &str) -> bool {
         "handsfree",
         "hands-free",
     ];
-    const EXCLUDED_TERMS: &[&str] = &["speaker", "soundbar", "mouse", "keyboard", "controller"];
+    const EXCLUDED_TERMS: &[&str] = &[
+        "speaker",
+        "soundbar",
+        "stage",
+        "mouse",
+        "keyboard",
+        "controller",
+    ];
 
     let lower = name.to_ascii_lowercase();
     if EXCLUDED_TERMS.iter().any(|term| lower.contains(term)) {
         return false;
     }
 
-    lower.contains("audio")
+    lower.ends_with(" bt")
+        || lower.contains(" bt ")
         || HEADPHONE_TERMS.iter().any(|term| lower.contains(term))
+}
+
+fn is_media_headphone_endpoint_name(name: &str) -> bool {
+    media_headphone_device_name(name).is_some()
+}
+
+fn media_headphone_device_name(name: &str) -> Option<String> {
+    const PREFIXES: &[&str] = &["Headphones (", "Headset ("];
+    for prefix in PREFIXES {
+        let Some(remainder) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        let device_name = remainder.strip_suffix(')')?.trim();
+        if device_name.is_empty() {
+            return None;
+        }
+        return Some(device_name.to_string());
+    }
+
+    let lower = name.to_ascii_lowercase();
+    for prefix in ["headphones (", "headset ("] {
+        let Some(inner) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let inner = inner.strip_suffix(')')?.trim();
+        if inner.is_empty() {
+            return None;
+        }
+        let start = prefix.len();
+        let end = name.len().saturating_sub(1);
+        return Some(name[start..end].trim().to_string());
+    }
+
+    None
+}
+
+fn is_transport_endpoint_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("avrcp") || lower.contains("hands-free") || lower.contains("hands free")
+}
+
+fn looks_like_headphone_name(name: &str) -> bool {
+    looks_like_bluetooth_headphone_name(name) || is_media_headphone_endpoint_name(name)
+}
+
+fn is_excluded_device_name(name: &str) -> bool {
+    const EXCLUDED_TERMS: &[&str] = &[
+        "microphone",
+        "mic (",
+        "soundbar",
+        "speaker",
+        "stage",
+        "mouse",
+        "keyboard",
+        "controller",
+    ];
+
+    let lower = name.to_ascii_lowercase();
+    EXCLUDED_TERMS.iter().any(|term| lower.contains(term))
 }
 
 fn is_headphone_class(major: i32, minor: i32) -> bool {
@@ -470,8 +728,11 @@ mod tests {
     #[test]
     fn recognizes_common_headphone_names() {
         assert!(looks_like_headphone_name("Galaxy Buds Pro"));
+        assert!(looks_like_headphone_name("BlackShark V3 BT"));
         assert!(!looks_like_headphone_name("Razer Basilisk V3"));
         assert!(!looks_like_headphone_name("Bluetooth Speaker"));
+        assert!(!looks_like_headphone_name("AMD Audio Device"));
+        assert!(!looks_like_headphone_name("Creative Stage"));
     }
 
     #[test]
@@ -484,6 +745,7 @@ mod tests {
 
     #[test]
     fn blackshark_bt_name_matches_windows_report() {
+        assert!(looks_like_headphone_name("BlackShark V3 BT"));
         assert!(is_headphone_class(4, 1));
     }
 
@@ -496,17 +758,18 @@ mod tests {
     }
 
     #[test]
-    fn merges_classic_and_le_records_and_keeps_battery() {
-        let mut devices = vec![summary("Barracuda X Stereo", None)];
-        merge_headset(&mut devices, summary("Barracuda X Bluetooth", Some(73)));
+    fn merges_transport_records_and_keeps_battery() {
+        let mut devices = vec![summary("BlackShark V3 BT Hands-Free AG", None)];
+        merge_headset(&mut devices, summary("BlackShark V3 BT", Some(93)));
 
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].battery_percent, Some(73));
+        assert_eq!(devices[0].name, "BlackShark V3 BT");
+        assert_eq!(devices[0].battery_percent, Some(93));
     }
 
     #[test]
     fn lookup_matches_hands_free_transport_name() {
-        let mut batteries = std::collections::HashMap::new();
+        let mut batteries = HashMap::new();
         batteries.insert(
             normalized_device_name("BlackShark V3 BT Hands-Free AG"),
             93,
@@ -525,6 +788,18 @@ mod tests {
     }
 
     #[test]
+    fn prefers_primary_bluetooth_name_over_transport() {
+        assert_eq!(
+            prefer_display_name("BlackShark V3 BT Hands-Free AG", "BlackShark V3 BT"),
+            "BlackShark V3 BT"
+        );
+        assert_eq!(
+            prefer_display_name("Headphones (BlackShark V3 BT)", "BlackShark V3 BT"),
+            "BlackShark V3 BT"
+        );
+    }
+
+    #[test]
     #[cfg(windows)]
     #[ignore = "manual check for Windows Bluetooth battery PnP data"]
     fn live_read_pnp_bluetooth_batteries() {
@@ -534,6 +809,40 @@ mod tests {
             lookup_pnp_battery("BlackShark V3 BT", &batteries).is_some(),
             "expected BlackShark battery via Windows PnP property"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "manual check for Windows Bluetooth headphone PnP discovery"]
+    fn live_enumerate_pnp_bluetooth_headphones() {
+        let batteries = collect_pnp_bluetooth_batteries();
+        let headsets = enumerate_pnp_bluetooth_headphones(&batteries);
+        eprintln!("{headsets:#?}");
+        assert!(
+            headsets.iter().any(|headset| headset.name.contains("BlackShark")),
+            "expected BlackShark headset via scoped PnP enumeration"
+        );
+    }
+
+    #[test]
+    fn extracts_device_name_from_media_endpoint() {
+        assert_eq!(
+            media_headphone_device_name("Headphones (BlackShark V3 BT)"),
+            Some("BlackShark V3 BT".to_string())
+        );
+        assert_eq!(
+            media_headphone_device_name("Headset (SOUNDPEATS Q40 HD)"),
+            Some("SOUNDPEATS Q40 HD".to_string())
+        );
+        assert_eq!(media_headphone_device_name("Speakers (Creative Stage)"), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn paired_only_device_without_connection_flag_is_not_connected() {
+        assert_eq!(BDIF_CONNECTED, 0x20);
+        assert_eq!(0x08 & BDIF_CONNECTED, 0); // paired only
+        assert_ne!(0x28 & BDIF_CONNECTED, 0); // paired + connected
     }
 
     #[test]

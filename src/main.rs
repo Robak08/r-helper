@@ -153,6 +153,7 @@ struct RazerGuiApp {
     last_razer_devices_refresh: std::time::Instant,
     hid_enum_receiver: Option<mpsc::Receiver<HidEnumMessage>>,
     bluetooth_headset_receiver: Option<mpsc::Receiver<Vec<BluetoothHeadsetSummary>>>,
+    bluetooth_poller_running: Option<Arc<AtomicBool>>,
     cooling_pad_usb_present: bool,
 
     device_hydrated: bool,
@@ -446,6 +447,7 @@ impl RazerGuiApp {
                 - std::time::Duration::from_secs(INFO_DEVICES_REFRESH_SECS as u64),
             hid_enum_receiver: None,
             bluetooth_headset_receiver: None,
+            bluetooth_poller_running: None,
             cooling_pad_usb_present: false,
 
             device_hydrated: false,
@@ -507,7 +509,6 @@ impl RazerGuiApp {
         app.start_background_initialization(init_sender);
         app.start_thermal_poller();
         app.start_hid_enum_poller();
-        app.start_bluetooth_headset_poller();
 
         app
     }
@@ -519,9 +520,23 @@ impl RazerGuiApp {
     }
 
     fn start_bluetooth_headset_poller(&mut self) {
+        if self.bluetooth_headset_receiver.is_some() {
+            return;
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        self.bluetooth_poller_running = Some(Arc::clone(&running));
         let (tx, rx) = mpsc::channel();
         self.bluetooth_headset_receiver = Some(rx);
-        spawn_bluetooth_headset_poller(tx);
+        spawn_bluetooth_headset_poller(tx, running);
+    }
+
+    fn stop_bluetooth_headset_poller(&mut self) {
+        if let Some(running) = &self.bluetooth_poller_running {
+            running.store(false, Ordering::Relaxed);
+        }
+        self.bluetooth_poller_running = None;
+        self.bluetooth_headset_receiver = None;
     }
 
     fn process_bluetooth_headset_messages(&mut self, ctx: &egui::Context) -> bool {
@@ -2011,11 +2026,18 @@ impl RazerGuiApp {
         if tab == AppTab::CoolingPad && self.cooling_pad.is_none() {
             return;
         }
-        if tab == AppTab::Info && self.active_tab != AppTab::Info {
+        let previous_tab = self.active_tab;
+        if tab == AppTab::Info && previous_tab != AppTab::Info {
             self.last_razer_devices_refresh = std::time::Instant::now()
                 - std::time::Duration::from_secs(INFO_DEVICES_REFRESH_SECS as u64);
         }
         self.active_tab = tab;
+
+        if tab == AppTab::Info && previous_tab != AppTab::Info {
+            self.start_bluetooth_headset_poller();
+        } else if previous_tab == AppTab::Info && tab != AppTab::Info {
+            self.stop_bluetooth_headset_poller();
+        }
     }
 
     fn refresh_battery_status_if_due(&mut self) {
