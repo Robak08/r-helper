@@ -75,16 +75,10 @@ pub fn compute_combined_auto(
 
     state.smoothed_cpu_c = ema_update(state.smoothed_cpu_c, inputs.cpu_temp_c, alpha);
     state.smoothed_gpu_c = ema_update(state.smoothed_gpu_c, inputs.gpu_temp_c, alpha);
-    let laptop_sample = if inputs.laptop_fan_follow_enabled {
-        inputs.laptop_fan_actual_rpm
-    } else {
-        None
-    };
-    state.smoothed_laptop_rpm = ema_update(
-        state.smoothed_laptop_rpm,
-        laptop_sample.map(|r| r as f32),
-        alpha,
-    );
+    let laptop_sample =
+        if inputs.laptop_fan_follow_enabled { inputs.laptop_fan_actual_rpm } else { None };
+    state.smoothed_laptop_rpm =
+        ema_update(state.smoothed_laptop_rpm, laptop_sample.map(|r| r as f32), alpha);
 
     let min_rpm = round_rpm(inputs.min_rpm.clamp(MIN_RPM, MAX_RPM));
     let max_rpm = round_rpm(inputs.max_rpm.clamp(min_rpm, MAX_RPM));
@@ -97,11 +91,7 @@ pub fn compute_combined_auto(
     let peak = peak_temp(state.smoothed_cpu_c, state.smoothed_gpu_c);
 
     if let Some(temp) = peak {
-        let off_threshold = if state.fan_running {
-            off_below - temp_hyst
-        } else {
-            off_below
-        };
+        let off_threshold = if state.fan_running { off_below - temp_hyst } else { off_below };
 
         if temp >= off_threshold {
             state.warm_dwell_secs += dt;
@@ -115,9 +105,7 @@ pub fn compute_combined_auto(
             if temp < off_threshold || state.warm_dwell_secs < inputs.turn_on_delay_secs {
                 return CoolingPadAutoOutput::Off;
             }
-        } else if temp < off_threshold
-            && state.cool_dwell_secs >= inputs.turn_off_delay_secs
-        {
+        } else if temp < off_threshold && state.cool_dwell_secs >= inputs.turn_off_delay_secs {
             reset_running_state(state);
             return CoolingPadAutoOutput::Off;
         }
@@ -130,9 +118,9 @@ pub fn compute_combined_auto(
     let peak = peak.unwrap_or(off_below);
     let temp_rpm = temp_to_rpm(peak, off_below, full_above, min_rpm, max_rpm);
 
-    let follow_rpm = state.smoothed_laptop_rpm.map(|rpm| {
-        scale_laptop_fan_rpm(round_rpm(rpm.round() as u16), min_rpm, max_rpm)
-    });
+    let follow_rpm = state
+        .smoothed_laptop_rpm
+        .map(|rpm| scale_laptop_fan_rpm(round_rpm(rpm.round() as u16), min_rpm, max_rpm));
 
     let mut target = if peak < off_below + follow_margin {
         temp_rpm
@@ -273,8 +261,8 @@ fn smoothstep(t: f32) -> f32 {
 }
 
 fn scale_laptop_fan_rpm(laptop_rpm: u16, min_rpm: u16, max_rpm: u16) -> u16 {
-    let scaled = (laptop_rpm as f32 / LAPTOP_FAN_MAX_RPM) * (max_rpm - min_rpm) as f32
-        + min_rpm as f32;
+    let scaled =
+        (laptop_rpm as f32 / LAPTOP_FAN_MAX_RPM) * (max_rpm - min_rpm) as f32 + min_rpm as f32;
     round_rpm(scaled.round() as u16)
 }
 

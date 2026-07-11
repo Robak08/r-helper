@@ -42,14 +42,10 @@ pub fn render_temp_pair(ui: &mut egui::Ui, cpu_temp_c: Option<f32>, gpu_temp_c: 
 
 pub fn info_temp_row(ui: &mut egui::Ui, label: &str, value: Option<f32>) {
     ui.horizontal(|ui| {
+        ui.add(egui::Label::new(RichText::new(format!("{label}:")).weak()).selectable(false));
         ui.add(
-            egui::Label::new(RichText::new(format!("{label}:")).weak()).selectable(false),
-        );
-        ui.add(
-            egui::Label::new(
-                RichText::new(format_temp_c(value)).color(temp_color(value)),
-            )
-            .selectable(false),
+            egui::Label::new(RichText::new(format_temp_c(value)).color(temp_color(value)))
+                .selectable(false),
         );
     });
 }

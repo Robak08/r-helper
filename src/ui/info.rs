@@ -1,6 +1,6 @@
 use eframe::egui::{self, RichText, Vec2};
 
-use crate::bluetooth::{normalized_device_name, BluetoothHeadsetSummary};
+use crate::bluetooth::{BluetoothHeadsetSummary, normalized_device_name};
 use crate::ui::temp::info_temp_row;
 use librazer::enumerate::{RazerDeviceKind, RazerDeviceSummary};
 use librazer::types::BatteryCare;
@@ -291,21 +291,13 @@ fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
 }
 
 fn format_time_mins(mins: u32) -> String {
-    if mins >= 60 {
-        format!("{} h {} min", mins / 60, mins % 60)
-    } else {
-        format!("{mins} min")
-    }
+    if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") }
 }
 
 impl LaptopInfoView {
     pub fn charge_limit_from_care(care: BatteryCare) -> Option<u8> {
         let pct = care.to_percent();
-        if pct >= 100 {
-            None
-        } else {
-            Some(pct)
-        }
+        if pct >= 100 { None } else { Some(pct) }
     }
 }
 

@@ -35,12 +35,7 @@ pub struct LightingAction {
 
 impl Default for LightingAction {
     fn default() -> Self {
-        Self {
-            logo_mode: None,
-            brightness: None,
-            lights_always_on: false,
-            slider_active: None,
-        }
+        Self { logo_mode: None, brightness: None, lights_always_on: false, slider_active: None }
     }
 }
 

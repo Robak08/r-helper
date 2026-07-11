@@ -1,15 +1,10 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use librazer::{command, device::Device, types::FanMode};
 
 use crate::system::thermal::ThermalSnapshot;
-use crate::thermal_poll::read_shared_thermal;
 
 pub const LAPTOP_FAN_CAP_HYSTERESIS: u16 = 100;
 pub const LAPTOP_FAN_CAP_RELEASE_TEMP_C: f32 = 65.0;
 pub const LAPTOP_FAN_CAP_COOL_DWELL_SECS: f32 = 3.0;
-const LAPTOP_FAN_CAP_INTERVAL: Duration = Duration::from_millis(800);
 
 /// Laptop auto-max RPM cap enforced on a dedicated thread (works while gaming / in tray).
 #[derive(Debug, Default)]
@@ -22,37 +17,25 @@ pub struct LaptopFanCapShared {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LaptopFanState {
+pub(crate) struct LaptopFanState {
     fan_mode: FanMode,
     fan_set_rpm: Option<u16>,
     fan_actual_rpm: Option<u16>,
 }
 
 #[derive(Debug, Default)]
-struct CapEnforcerState {
+pub(crate) struct CapEnforcerState {
     cool_temp_dwell_secs: f32,
 }
 
-fn read_laptop_fan_state(device: &Device) -> Option<LaptopFanState> {
-    use librazer::types::FanZone;
-
-    let fan_actual_rpm = command::get_fan_actual_rpm(device, FanZone::Zone1).ok();
-    let (fan_mode, fan_set_rpm) = match command::get_perf_mode(device) {
-        Ok((_, fm)) => {
-            let rpm = if fm == FanMode::Manual {
-                command::get_fan_rpm(device, FanZone::Zone1).ok()
-            } else {
-                None
-            };
-            (fm, rpm)
-        }
-        Err(_) => return None,
-    };
-    Some(LaptopFanState {
-        fan_mode,
-        fan_set_rpm,
-        fan_actual_rpm,
-    })
+impl LaptopFanState {
+    pub(crate) fn new(
+        fan_mode: FanMode,
+        fan_set_rpm: Option<u16>,
+        fan_actual_rpm: Option<u16>,
+    ) -> Self {
+        Self { fan_mode, fan_set_rpm, fan_actual_rpm }
+    }
 }
 
 fn peak_temp_c(thermal: &ThermalSnapshot) -> Option<f32> {
@@ -180,41 +163,15 @@ fn enforce_laptop_fan_cap(
     }
 }
 
-pub fn spawn_laptop_fan_cap_enforcer(
-    device: Arc<Mutex<Device>>,
-    laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
-    shared_thermal: Arc<Mutex<ThermalSnapshot>>,
+pub(crate) fn enforce_laptop_fan_cap_from_sample(
+    device: &Device,
+    cap: &mut LaptopFanCapShared,
+    fan: LaptopFanState,
+    thermal: &ThermalSnapshot,
+    state: &mut CapEnforcerState,
+    dt_secs: f32,
 ) {
-    std::thread::Builder::new()
-        .name("laptop-fan-cap".into())
-        .spawn(move || {
-            let mut state = CapEnforcerState::default();
-            let mut last_tick = std::time::Instant::now();
-
-            loop {
-                std::thread::sleep(LAPTOP_FAN_CAP_INTERVAL);
-                let dt_secs = last_tick.elapsed().as_secs_f32().clamp(0.05, 2.0);
-                last_tick = std::time::Instant::now();
-
-                let Ok(mut cap) = laptop_fan_cap.lock() else {
-                    continue;
-                };
-                if cap.skip {
-                    continue;
-                }
-
-                let Ok(device) = device.try_lock() else {
-                    continue;
-                };
-                let Some(fan) = read_laptop_fan_state(&device) else {
-                    continue;
-                };
-
-                let thermal = read_shared_thermal(&shared_thermal);
-                enforce_laptop_fan_cap(&device, &mut cap, fan, &thermal, &mut state, dt_secs);
-            }
-        })
-        .expect("laptop fan cap enforcer thread");
+    enforce_laptop_fan_cap(device, cap, fan, thermal, state, dt_secs);
 }
 
 #[cfg(test)]
@@ -223,10 +180,7 @@ mod tests {
 
     #[test]
     fn releases_when_actual_at_or_below_max() {
-        let thermal = ThermalSnapshot {
-            cpu_avg_c: Some(57.0),
-            gpu_avg_c: Some(55.0),
-        };
+        let thermal = ThermalSnapshot { cpu_avg_c: Some(57.0), gpu_avg_c: Some(55.0) };
         let mut state = CapEnforcerState::default();
         assert!(should_release_cap(4000, 4000, &thermal, &mut state, 0.8));
         assert!(should_release_cap(4000, 3900, &thermal, &mut state, 0.8));
@@ -234,10 +188,7 @@ mod tests {
 
     #[test]
     fn releases_after_cool_temp_dwell() {
-        let thermal = ThermalSnapshot {
-            cpu_avg_c: Some(57.0),
-            gpu_avg_c: None,
-        };
+        let thermal = ThermalSnapshot { cpu_avg_c: Some(57.0), gpu_avg_c: None };
         let mut state = CapEnforcerState::default();
         assert!(!should_release_cap(4000, 4100, &thermal, &mut state, 1.0));
         assert!(!should_release_cap(4000, 4100, &thermal, &mut state, 1.0));
@@ -246,10 +197,7 @@ mod tests {
 
     #[test]
     fn no_release_when_hot_and_above_max() {
-        let thermal = ThermalSnapshot {
-            cpu_avg_c: Some(85.0),
-            gpu_avg_c: Some(80.0),
-        };
+        let thermal = ThermalSnapshot { cpu_avg_c: Some(85.0), gpu_avg_c: Some(80.0) };
         let mut state = CapEnforcerState::default();
         assert!(!should_release_cap(4000, 4100, &thermal, &mut state, 5.0));
     }

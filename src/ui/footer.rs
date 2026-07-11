@@ -49,4 +49,3 @@ fn render_version_info(ui: &mut egui::Ui) {
 fn render_status_toggle(ui: &mut egui::Ui, status_messages: &mut bool) {
     ui.checkbox(status_messages, "🐛 Debug");
 }
-

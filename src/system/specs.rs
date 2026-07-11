@@ -11,7 +11,7 @@ pub struct SystemSpecs {
 }
 
 #[derive(Debug, Clone)]
-pub struct HardwareSpecs {
+struct HardwareSpecs {
     pub cpu_name: String,
     pub gpu_models: Vec<String>,
     pub ram_gb: Option<u32>,
@@ -39,7 +39,7 @@ impl Default for SystemSpecs {
 }
 
 /// Load CPU, GPU, and RAM via a single PowerShell invocation.
-pub fn load_hardware_specs() -> HardwareSpecs {
+fn load_hardware_specs() -> HardwareSpecs {
     match load_hardware_specs_inner() {
         Ok(specs) => specs,
         Err(e) => {
@@ -101,17 +101,9 @@ $ram = [math]::Round((Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMe
 
     let gpu_models = parse_gpu_json(&parsed.gpu);
     let cpu_name = clean_display_string(parsed.cpu.trim());
-    let cpu_name = if cpu_name.is_empty() {
-        "Unknown".to_string()
-    } else {
-        cpu_name
-    };
+    let cpu_name = if cpu_name.is_empty() { "Unknown".to_string() } else { cpu_name };
 
-    Ok(HardwareSpecs {
-        cpu_name,
-        gpu_models,
-        ram_gb: parsed.ram,
-    })
+    Ok(HardwareSpecs { cpu_name, gpu_models, ram_gb: parsed.ram })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -128,20 +120,12 @@ fn parse_gpu_json(value: &serde_json::Value) -> Vec<String> {
             .collect(),
         serde_json::Value::String(s) => {
             let cleaned = clean_display_string(s);
-            if cleaned.is_empty() {
-                vec![]
-            } else {
-                vec![cleaned]
-            }
+            if cleaned.is_empty() { vec![] } else { vec![cleaned] }
         }
         _ => vec![],
     };
 
-    if names.is_empty() {
-        vec!["No discrete GPU detected".to_string()]
-    } else {
-        names
-    }
+    if names.is_empty() { vec!["No discrete GPU detected".to_string()] } else { names }
 }
 
 // Keep model + inch size + optional year from BIOS when PID is unknown.

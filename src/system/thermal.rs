@@ -27,7 +27,7 @@ pub struct SpikeFilterOptions {
     pub allow_sustained: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThermalSnapshot {
     pub cpu_avg_c: Option<f32>,
     pub gpu_avg_c: Option<f32>,
@@ -137,10 +137,7 @@ pub fn filter_thermal_snapshot_spike(
 ) -> ThermalSnapshot {
     filter_thermal_raw_snapshot(
         prev,
-        ThermalRawSnapshot {
-            snapshot: new,
-            cpu_source: None,
-        },
+        ThermalRawSnapshot { snapshot: new, cpu_source: None },
         state,
         &mut None,
     )
@@ -152,7 +149,12 @@ pub fn filter_thermal_raw_snapshot(
     state: &mut ThermalSpikeFilterState,
     last_cpu_source: &mut Option<CpuTempSource>,
 ) -> ThermalSnapshot {
-    let cpu_options = cpu_spike_filter_options(prev.cpu_avg_c, raw.snapshot.cpu_avg_c, *last_cpu_source, raw.cpu_source);
+    let cpu_options = cpu_spike_filter_options(
+        prev.cpu_avg_c,
+        raw.snapshot.cpu_avg_c,
+        *last_cpu_source,
+        raw.cpu_source,
+    );
     *last_cpu_source = raw.cpu_source;
 
     ThermalSnapshot {
@@ -185,9 +187,7 @@ fn cpu_spike_filter_options(
         (Some(p), Some(s)) => s > p + DEFAULT_TEMP_SPIKE_REJECT_C,
         _ => false,
     };
-    SpikeFilterOptions {
-        allow_sustained: !(source_downgrade && large_jump),
-    }
+    SpikeFilterOptions { allow_sustained: !(source_downgrade && large_jump) }
 }
 
 #[cfg(target_os = "windows")]
@@ -233,13 +233,7 @@ impl ThermalReader {
 
         let gpu_avg_c = lhm_gpu.or_else(|| self.read_nvml_gpu_temp());
 
-        ThermalRawSnapshot {
-            snapshot: ThermalSnapshot {
-                cpu_avg_c,
-                gpu_avg_c,
-            },
-            cpu_source,
-        }
+        ThermalRawSnapshot { snapshot: ThermalSnapshot { cpu_avg_c, gpu_avg_c }, cpu_source }
     }
 
     fn read_hw_monitor_temps(&mut self) -> (Option<f32>, Option<f32>) {
@@ -292,10 +286,7 @@ impl ThermalReader {
             {
                 continue;
             }
-            return device
-                .temperature(TemperatureSensor::Gpu)
-                .ok()
-                .map(|t| t as f32);
+            return device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
         }
 
         None
@@ -329,10 +320,7 @@ fn thermal_debug_log(sensor: &str, source: &str, value: f32) {
 fn thermal_debug_log(_sensor: &str, _source: &str, _value: f32) {}
 
 #[cfg(target_os = "windows")]
-const HW_MONITOR_NAMESPACES: &[&str] = &[
-    "ROOT\\LibreHardwareMonitor",
-    "ROOT\\OpenHardwareMonitor",
-];
+const HW_MONITOR_NAMESPACES: &[&str] = &["ROOT\\LibreHardwareMonitor", "ROOT\\OpenHardwareMonitor"];
 
 #[cfg(target_os = "windows")]
 fn query_hw_monitor_sensors_cached(
@@ -354,17 +342,13 @@ struct LhmSensor {
 
 #[cfg(target_os = "windows")]
 fn is_cpu_core_sensor(name: &str) -> bool {
-    name.starts_with("Core #")
-        || name.starts_with("CPU Core ")
-        || name.starts_with("CCD")
+    name.starts_with("Core #") || name.starts_with("CPU Core ") || name.starts_with("CCD")
 }
 
 #[cfg(target_os = "windows")]
 fn is_cpu_package_sensor(name: &str) -> bool {
-    matches!(
-        name,
-        "CPU Package" | "CPU CCD1" | "Tctl" | "Tdie" | "CPU Total" | "Core (Tctl/Tdie)"
-    ) || name.starts_with("CPU CCD")
+    matches!(name, "CPU Package" | "CPU CCD1" | "Tctl" | "Tdie" | "CPU Total" | "Core (Tctl/Tdie)")
+        || name.starts_with("CPU CCD")
 }
 
 #[cfg(target_os = "windows")]
@@ -376,19 +360,14 @@ fn avg_lhm_cpu(sensors: &[&LhmSensor]) -> Option<f32> {
         .collect();
 
     // HWMonitor aligns with Package on Intel and Tctl/Tdie on AMD.
-    if let Some(package) = cpu_sensors
-        .iter()
-        .find(|s| is_cpu_package_sensor(&s.name))
-        .map(|s| s.value)
+    if let Some(package) =
+        cpu_sensors.iter().find(|s| is_cpu_package_sensor(&s.name)).map(|s| s.value)
     {
         return Some(package);
     }
 
-    let core_temps: Vec<f32> = cpu_sensors
-        .iter()
-        .filter(|s| is_cpu_core_sensor(&s.name))
-        .map(|s| s.value)
-        .collect();
+    let core_temps: Vec<f32> =
+        cpu_sensors.iter().filter(|s| is_cpu_core_sensor(&s.name)).map(|s| s.value).collect();
 
     if !core_temps.is_empty() {
         return max_temp(&core_temps);
@@ -441,11 +420,7 @@ fn kelvin_to_celsius(kelvin: u32) -> f32 {
 
 #[cfg(target_os = "windows")]
 fn valid_cpu_temp(celsius: f32) -> Option<f32> {
-    if celsius > 0.0 && celsius < 150.0 {
-        Some(celsius)
-    } else {
-        None
-    }
+    if celsius > 0.0 && celsius < 150.0 { Some(celsius) } else { None }
 }
 
 #[cfg(target_os = "windows")]
@@ -458,9 +433,7 @@ fn zone_temp_c(zone: &ThermalZonePerf) -> Option<f32> {
     if let Some(kelvin_tenths) = zone.high_precision_temperature.filter(|&v| v > 0) {
         return valid_cpu_temp(kelvin_tenths_to_celsius(kelvin_tenths));
     }
-    zone.temperature
-        .filter(|&v| v > 0)
-        .and_then(|kelvin| valid_cpu_temp(kelvin_to_celsius(kelvin)))
+    zone.temperature.filter(|&v| v > 0).and_then(|kelvin| valid_cpu_temp(kelvin_to_celsius(kelvin)))
 }
 
 /// True for ACPI CPU thermal zones; excludes embedded-controller proxy zones (e.g. TZRZ).
@@ -522,15 +495,9 @@ mod filter_tests {
     #[test]
     fn spike_filter_does_not_lock_when_sustained_high() {
         let mut state = ThermalSpikeFilterState::default();
-        let mut prev = ThermalSnapshot {
-            cpu_avg_c: Some(68.0),
-            gpu_avg_c: None,
-        };
+        let mut prev = ThermalSnapshot { cpu_avg_c: Some(68.0), gpu_avg_c: None };
         for i in 0..3 {
-            let raw = ThermalSnapshot {
-                cpu_avg_c: Some(95.0),
-                gpu_avg_c: None,
-            };
+            let raw = ThermalSnapshot { cpu_avg_c: Some(95.0), gpu_avg_c: None };
             prev = filter_thermal_snapshot_spike(&prev, raw, &mut state);
             if i < 2 {
                 assert_eq!(prev.cpu_avg_c, Some(68.0), "hold until sustained");
@@ -542,20 +509,11 @@ mod filter_tests {
     #[test]
     fn spike_filter_rejects_single_glitch() {
         let mut state = ThermalSpikeFilterState::default();
-        let prev = ThermalSnapshot {
-            cpu_avg_c: Some(62.0),
-            gpu_avg_c: None,
-        };
-        let spike = ThermalSnapshot {
-            cpu_avg_c: Some(92.0),
-            gpu_avg_c: None,
-        };
+        let prev = ThermalSnapshot { cpu_avg_c: Some(62.0), gpu_avg_c: None };
+        let spike = ThermalSnapshot { cpu_avg_c: Some(92.0), gpu_avg_c: None };
         let after_spike = filter_thermal_snapshot_spike(&prev, spike, &mut state);
         assert_eq!(after_spike.cpu_avg_c, Some(62.0));
-        let normal = ThermalSnapshot {
-            cpu_avg_c: Some(63.0),
-            gpu_avg_c: None,
-        };
+        let normal = ThermalSnapshot { cpu_avg_c: Some(63.0), gpu_avg_c: None };
         let after_normal = filter_thermal_snapshot_spike(&after_spike, normal, &mut state);
         assert_eq!(after_normal.cpu_avg_c, Some(63.0));
     }
@@ -564,16 +522,10 @@ mod filter_tests {
     fn bootstrap_rejects_login_glitch() {
         let mut state = ThermalSpikeFilterState::default();
         let prev = ThermalSnapshot::default();
-        let glitch = ThermalSnapshot {
-            cpu_avg_c: Some(96.0),
-            gpu_avg_c: None,
-        };
+        let glitch = ThermalSnapshot { cpu_avg_c: Some(96.0), gpu_avg_c: None };
         let after_glitch = filter_thermal_snapshot_spike(&prev, glitch, &mut state);
         assert_eq!(after_glitch.cpu_avg_c, None);
-        let normal = ThermalSnapshot {
-            cpu_avg_c: Some(64.0),
-            gpu_avg_c: None,
-        };
+        let normal = ThermalSnapshot { cpu_avg_c: Some(64.0), gpu_avg_c: None };
         let after_normal = filter_thermal_snapshot_spike(&after_glitch, normal, &mut state);
         assert_eq!(after_normal.cpu_avg_c, Some(64.0));
     }
@@ -582,15 +534,9 @@ mod filter_tests {
     fn source_downgrade_holds_spike() {
         let mut state = ThermalSpikeFilterState::default();
         let mut last_source = Some(CpuTempSource::Lhm);
-        let prev = ThermalSnapshot {
-            cpu_avg_c: Some(68.0),
-            gpu_avg_c: None,
-        };
+        let prev = ThermalSnapshot { cpu_avg_c: Some(68.0), gpu_avg_c: None };
         let raw = ThermalRawSnapshot {
-            snapshot: ThermalSnapshot {
-                cpu_avg_c: Some(96.0),
-                gpu_avg_c: None,
-            },
+            snapshot: ThermalSnapshot { cpu_avg_c: Some(96.0), gpu_avg_c: None },
             cpu_source: Some(CpuTempSource::PerfCounter),
         };
         let filtered = filter_thermal_raw_snapshot(&prev, raw, &mut state, &mut last_source);
@@ -616,10 +562,7 @@ mod windows_tests {
         let wmi_con = wmi::WMIConnection::new().expect("wmi");
         let temp = read_perf_counter_cpu_temp_from(&wmi_con).expect("perf counter temp");
         // Primary ACPI zone on this class of laptop; should not be diluted by EC zones.
-        assert!(
-            temp > 55.0,
-            "expected primary CPU thermal zone (~62 C), got {temp}"
-        );
+        assert!(temp > 55.0, "expected primary CPU thermal zone (~62 C), got {temp}");
     }
 
     fn read_snapshot() -> ThermalSnapshot {

@@ -1,14 +1,15 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use crate::cooling_pad_auto::{
-    compute_combined_auto, CoolingPadAutoInputs, CoolingPadAutoOutput, CoolingPadAutoState,
+    CoolingPadAutoInputs, CoolingPadAutoOutput, CoolingPadAutoState, compute_combined_auto,
 };
 use crate::cooling_pad_handle::SharedCoolingPad;
 use crate::ui::cooling_pad_fan::CoolingPadFanMode;
+use crate::worker::StopSignal;
 
 const ENFORCE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -68,25 +69,26 @@ pub struct CoolingPadEnforceContext {
     pub pad: Arc<Mutex<Option<SharedCoolingPad>>>,
     pub pending_cooling_pad_restore: Arc<AtomicBool>,
     pub needs_redetect: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CoolingPadEnforceContext {
     pub fn start(shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
+        let stop = StopSignal::new();
         let settings = Arc::new(Mutex::new(CoolingPadEnforceShared::default()));
         let laptop_fan_rpm = Arc::new(Mutex::new(None));
         let pad = Arc::new(Mutex::new(None));
         let pending_cooling_pad_restore = Arc::new(AtomicBool::new(false));
         let needs_redetect = Arc::new(AtomicBool::new(false));
 
-        spawn_cooling_pad_enforcer(
+        let handle = spawn_cooling_pad_enforcer(
             Arc::clone(&settings),
             Arc::clone(&laptop_fan_rpm),
             Arc::clone(&pad),
             Arc::clone(&needs_redetect),
             Arc::clone(&shared_thermal),
-            Arc::clone(&running),
+            Arc::clone(&stop),
         );
 
         Self {
@@ -95,12 +97,16 @@ impl CoolingPadEnforceContext {
             pad,
             pending_cooling_pad_restore,
             needs_redetect,
-            running,
+            stop,
+            handle: Some(handle),
         }
     }
 
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
+    pub fn stop(&mut self) {
+        self.stop.stop();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -110,23 +116,19 @@ fn spawn_cooling_pad_enforcer(
     pad_slot: Arc<Mutex<Option<SharedCoolingPad>>>,
     needs_redetect: Arc<AtomicBool>,
     shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>,
-    running: Arc<AtomicBool>,
-) {
+    stop: Arc<StopSignal>,
+) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("cooling-pad-enforce".into())
         .spawn(move || {
             let mut last_tick = Instant::now();
 
-            while running.load(Ordering::Relaxed) {
-                std::thread::sleep(ENFORCE_INTERVAL);
-                if !running.load(Ordering::Relaxed) {
+            while !stop.is_stopped() {
+                if stop.wait(ENFORCE_INTERVAL) {
                     break;
                 }
 
-                let pad = pad_slot
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone());
+                let pad = pad_slot.lock().ok().and_then(|guard| guard.clone());
                 let Some(pad) = pad else {
                     continue;
                 };
@@ -154,9 +156,7 @@ fn spawn_cooling_pad_enforcer(
                     CoolingPadFanMode::Manual => {
                         let rpm = settings_guard.manual_rpm;
                         drop(settings_guard);
-                        let failed = pad
-                            .with(|p| p.set_fan_rpm(rpm))
-                            .is_none_or(|r| r.is_err());
+                        let failed = pad.with(|p| p.set_fan_rpm(rpm)).is_none_or(|r| r.is_err());
                         if failed {
                             needs_redetect.store(true, Ordering::Relaxed);
                         }
@@ -185,18 +185,17 @@ fn spawn_cooling_pad_enforcer(
                             follow_temp_margin_c: settings_guard.auto_follow_temp_margin_c,
                             laptop_fan_follow_enabled: settings_guard.laptop_fan_follow_enabled,
                         };
-                        let output =
-                            compute_combined_auto(&inputs, &mut settings_guard.auto_state);
+                        let output = compute_combined_auto(&inputs, &mut settings_guard.auto_state);
                         settings_guard.last_enforce_time = Instant::now();
                         drop(settings_guard);
 
                         let failed = match output {
-                            CoolingPadAutoOutput::Off => pad
-                                .with(|p| p.fan_off())
-                                .is_none_or(|r| r.is_err()),
-                            CoolingPadAutoOutput::Rpm(rpm) => pad
-                                .with(|p| p.set_fan_rpm(rpm))
-                                .is_none_or(|r| r.is_err()),
+                            CoolingPadAutoOutput::Off => {
+                                pad.with(|p| p.fan_off()).is_none_or(|r| r.is_err())
+                            }
+                            CoolingPadAutoOutput::Rpm(rpm) => {
+                                pad.with(|p| p.set_fan_rpm(rpm)).is_none_or(|r| r.is_err())
+                            }
                         };
                         if failed {
                             needs_redetect.store(true, Ordering::Relaxed);
@@ -206,5 +205,5 @@ fn spawn_cooling_pad_enforcer(
                 }
             }
         })
-        .expect("cooling pad enforcer thread");
+        .expect("cooling pad enforcer thread")
 }

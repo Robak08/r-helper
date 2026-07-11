@@ -1,16 +1,17 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
 };
 
 pub struct TraySharedState {
     hwnd: Mutex<Option<isize>>,
     visible: AtomicBool,
+    quit_requested: AtomicBool,
     ctx: eframe::egui::Context,
 }
 
@@ -19,6 +20,7 @@ impl TraySharedState {
         Arc::new(Self {
             hwnd: Mutex::new(None),
             visible: AtomicBool::new(true),
+            quit_requested: AtomicBool::new(false),
             ctx,
         })
     }
@@ -47,6 +49,15 @@ impl TraySharedState {
             self.visible.store(false, Ordering::Relaxed);
         }
     }
+
+    pub fn request_quit(&self) {
+        self.quit_requested.store(true, Ordering::Release);
+        self.ctx.request_repaint();
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested.load(Ordering::Acquire)
+    }
 }
 
 pub struct TrayHandle {
@@ -59,33 +70,27 @@ impl TrayHandle {
         let quit_menu_id = MenuId::new("quit");
         let show_item = MenuItem::with_id(show_menu_id.clone(), "Show R-Helper", true, None);
         let quit_item = MenuItem::with_id(quit_menu_id.clone(), "Quit", true, None);
-        let menu = Menu::with_items(&[
-            &show_item,
-            &PredefinedMenuItem::separator(),
-            &quit_item,
-        ])
-        .expect("tray menu");
+        let menu = Menu::with_items(&[&show_item, &PredefinedMenuItem::separator(), &quit_item])
+            .expect("tray menu");
 
         let menu_state = Arc::clone(&state);
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if event.id == show_menu_id {
                 menu_state.show();
             } else if event.id == quit_menu_id {
-                std::process::exit(0);
+                menu_state.request_quit();
             }
         }));
 
         let icon_state = Arc::clone(&state);
-        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-            match event {
-                TrayIconEvent::DoubleClick { .. } => icon_state.show(),
-                TrayIconEvent::Click {
-                    button: tray_icon::MouseButton::Left,
-                    button_state: tray_icon::MouseButtonState::Up,
-                    ..
-                } => icon_state.show(),
-                _ => {}
-            }
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| match event {
+            TrayIconEvent::DoubleClick { .. } => icon_state.show(),
+            TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Up,
+                ..
+            } => icon_state.show(),
+            _ => {}
         }));
 
         let tray = TrayIconBuilder::new()
@@ -100,9 +105,7 @@ impl TrayHandle {
 }
 
 #[cfg(windows)]
-pub fn hwnd_from_window_handle(
-    handle: &dyn raw_window_handle::HasWindowHandle,
-) -> Option<isize> {
+pub fn hwnd_from_window_handle(handle: &dyn raw_window_handle::HasWindowHandle) -> Option<isize> {
     use raw_window_handle::RawWindowHandle;
 
     let raw = handle.window_handle().ok()?.as_raw();
@@ -115,7 +118,7 @@ pub fn hwnd_from_window_handle(
 #[cfg(windows)]
 pub fn hide_window(hwnd: isize) {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
     unsafe {
         let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
@@ -125,7 +128,7 @@ pub fn hide_window(hwnd: isize) {
 #[cfg(windows)]
 pub fn show_window(hwnd: isize) {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_SHOW};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, SetForegroundWindow, ShowWindow};
 
     unsafe {
         let hwnd = HWND(hwnd as *mut _);
@@ -140,16 +143,18 @@ pub fn show_window(hwnd: isize) {
 pub fn set_windows_taskbar_icon(hwnd: isize) {
     use std::ffi::c_void;
 
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
     use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_RelaunchIconResource;
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
-    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        LoadImageW, SendMessageW, GDI_IMAGE_TYPE, ICON_BIG, ICON_SMALL, IMAGE_ICON, IMAGE_FLAGS,
-        LR_DEFAULTSIZE, WM_SETICON,
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, SHGetPropertyStoreForWindow,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GDI_IMAGE_TYPE, ICON_BIG, ICON_SMALL, IMAGE_FLAGS, IMAGE_ICON, LR_DEFAULTSIZE, LoadImageW,
+        SendMessageW, WM_SETICON,
+    };
+    use windows::core::PCWSTR;
 
     const APP_ICON_RESOURCE_ID: u16 = 1;
 
@@ -204,9 +209,7 @@ pub fn set_windows_taskbar_icon(hwnd: isize) {
 }
 
 #[cfg(not(windows))]
-pub fn hwnd_from_window_handle(
-    _handle: &dyn raw_window_handle::HasWindowHandle,
-) -> Option<isize> {
+pub fn hwnd_from_window_handle(_handle: &dyn raw_window_handle::HasWindowHandle) -> Option<isize> {
     None
 }
 
@@ -220,6 +223,5 @@ pub fn show_window(_hwnd: isize) {}
 pub fn set_windows_taskbar_icon(_hwnd: isize) {}
 
 pub fn icon_from_egui(icon: eframe::egui::IconData) -> tray_icon::Icon {
-    tray_icon::Icon::from_rgba(icon.rgba, icon.width, icon.height)
-        .expect("tray icon rgba")
+    tray_icon::Icon::from_rgba(icon.rgba, icon.width, icon.height).expect("tray icon rgba")
 }

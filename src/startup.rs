@@ -6,8 +6,8 @@ const APP_REGISTRY_NAME: &str = "R-Helper";
 
 #[cfg(windows)]
 pub fn is_startup_enabled() -> bool {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     hkcu.open_subkey(RUN_KEY)
@@ -23,8 +23,8 @@ pub fn is_startup_enabled() -> bool {
 
 #[cfg(windows)]
 pub fn set_startup_enabled(enabled: bool) -> anyhow::Result<()> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (run, _) = hkcu.create_subkey(RUN_KEY)?;

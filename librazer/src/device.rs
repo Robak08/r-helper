@@ -3,7 +3,7 @@ use crate::descriptor::Descriptor;
 use crate::packet::Packet;
 use crate::profile::{lookup_profile, resolve_generation};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::{thread, time::Duration};
 
 pub struct Device {
@@ -84,6 +84,10 @@ impl Device {
 
     pub fn send(&self, report: Packet) -> Result<Packet> {
         let mut response_buf: Vec<u8> = vec![0x00; 1 + std::mem::size_of::<Packet>()];
+        let report_bytes: Vec<u8> = (&report).into();
+        let mut request_buf = Vec::with_capacity(1 + report_bytes.len());
+        request_buf.push(0);
+        request_buf.extend_from_slice(&report_bytes);
 
         const MAX_RETRIES: usize = 5;
 
@@ -91,14 +95,7 @@ impl Device {
             thread::sleep(Duration::from_micros(1000));
 
             self.device
-                .send_feature_report(
-                    [0_u8; 1]
-                        .iter()
-                        .copied()
-                        .chain(Into::<Vec<u8>>::into(&report).into_iter())
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                )
+                .send_feature_report(&request_buf)
                 .context("Failed to send feature report")?;
 
             thread::sleep(Duration::from_micros(2000));
@@ -152,7 +149,8 @@ impl Device {
         let generation = resolve_generation(target_pid, &model_sku);
 
         let probed = probe_features(&device);
-        let descriptor = resolve_descriptor(model_sku, display_name, target_pid, generation, probed);
+        let descriptor =
+            resolve_descriptor(model_sku, display_name, target_pid, generation, probed);
         device.info = descriptor;
 
         let init_cmds = generation.default_init_cmds();

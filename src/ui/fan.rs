@@ -136,9 +136,7 @@ fn render_fan_header(
                 } else {
                     format!("{actual_rpm} RPM")
                 };
-                ui.add(
-                    egui::Label::new(RichText::new(label).color(rpm_color)).selectable(false),
-                );
+                ui.add(egui::Label::new(RichText::new(label).color(rpm_color)).selectable(false));
             } else {
                 ui.add(egui::Label::new(RichText::new("N/A")).selectable(false));
             }
@@ -179,10 +177,7 @@ fn render_auto_fan_limit_controls(
     let mut action = None;
 
     ui.horizontal(|ui| {
-        if ui
-            .checkbox(&mut limit_enabled, "Limit max RPM")
-            .changed()
-        {
+        if ui.checkbox(&mut limit_enabled, "Limit max RPM").changed() {
             action = Some(FanAction::ToggleAutoFanLimit(limit_enabled));
         }
 
@@ -245,18 +240,12 @@ fn render_current_status(
     };
 
     ui.horizontal(|ui| {
-        ui.add(
-            egui::Label::new(format!("Current: {}", status)).selectable(false),
-        );
+        ui.add(egui::Label::new(format!("Current: {}", status)).selectable(false));
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add(
-                egui::Label::new(temp_rich_text("GPU", gpu_avg_temp_c)).selectable(false),
-            );
+            ui.add(egui::Label::new(temp_rich_text("GPU", gpu_avg_temp_c)).selectable(false));
             ui.add(egui::Label::new(RichText::new("|").weak()).selectable(false));
-            ui.add(
-                egui::Label::new(temp_rich_text("CPU", cpu_avg_temp_c)).selectable(false),
-            );
+            ui.add(egui::Label::new(temp_rich_text("CPU", cpu_avg_temp_c)).selectable(false));
         });
     });
 }

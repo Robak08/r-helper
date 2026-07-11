@@ -5,17 +5,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::device::CompleteDeviceState;
 use crate::cooling_pad_auto::{
     DEFAULT_FOLLOW_TEMP_MARGIN_C, DEFAULT_OVERCOOL_HOLD_SECS, DEFAULT_RPM_SLEW_DOWN_PER_SEC,
     DEFAULT_RPM_SLEW_UP_PER_SEC, DEFAULT_TEMP_EMA_ALPHA, DEFAULT_TEMP_HYSTERESIS_C,
     DEFAULT_TURN_OFF_DELAY_SECS, DEFAULT_TURN_ON_DELAY_SECS,
 };
+use crate::device::CompleteDeviceState;
 use crate::startup;
 
-const CONFIG_VERSION: u32 = 2;
+pub(crate) const CONFIG_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoolingPadConfig {
     #[serde(default = "default_fan_mode")]
     pub fan_mode: String,
@@ -153,7 +153,7 @@ impl Default for CoolingPadConfig {
 }
 
 /// Runtime cooling-pad settings mirrored in the GUI app.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoolingPadRuntime {
     pub fan_mode: String,
     pub manual_rpm: u16,
@@ -225,7 +225,7 @@ impl From<CoolingPadRuntime> for CoolingPadConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     pub version: u32,
     pub auto_switch_enabled: bool,
@@ -283,10 +283,8 @@ impl AppConfig {
     pub fn load() -> Self {
         match Self::load_from_disk() {
             Ok((config, migrated)) => {
-                if migrated {
-                    if let Err(e) = config.save() {
-                        eprintln!("Failed to rewrite migrated config: {e}");
-                    }
+                if migrated && let Err(e) = config.save() {
+                    eprintln!("Failed to rewrite migrated config: {e}");
                 }
                 config
             }
@@ -304,7 +302,7 @@ impl AppConfig {
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
         }
         let json = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
-        fs::write(&path, json).with_context(|| format!("Failed to write config to {:?}", path))?;
+        write_config_atomically(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -312,8 +310,11 @@ impl AppConfig {
         let path = config_file_path();
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;
-        let raw: Value =
-            serde_json::from_str(&contents).context("Failed to parse config JSON")?;
+        Self::parse(&contents)
+    }
+
+    fn parse(contents: &str) -> Result<(Self, bool)> {
+        let raw: Value = serde_json::from_str(contents).context("Failed to parse config JSON")?;
         let mut config: AppConfig =
             serde_json::from_value(raw.clone()).context("Failed to parse config JSON")?;
         let mut migrated = false;
@@ -326,28 +327,57 @@ impl AppConfig {
     }
 }
 
+fn write_config_atomically(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    let temp_path = path.with_extension("json.tmp");
+    let mut file = fs::File::create(&temp_path)
+        .with_context(|| format!("Failed to create temporary config {:?}", temp_path))?;
+    use std::io::Write;
+    file.write_all(contents)
+        .with_context(|| format!("Failed to write temporary config {:?}", temp_path))?;
+    file.sync_all().with_context(|| format!("Failed to flush temporary config {:?}", temp_path))?;
+    drop(file);
+
+    replace_file(&temp_path, path)
+        .with_context(|| format!("Failed to replace config {:?} with {:?}", path, temp_path))
+}
+
+#[cfg(windows)]
+fn replace_file(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let source = source.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let destination = destination.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .context("MoveFileExW failed")
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    fs::rename(source, destination).context("rename failed")
+}
+
 fn migrate_config_to_v2(config: &mut AppConfig, raw: &Value) {
-    let had_fan_mode = raw
-        .get("cooling_pad")
-        .and_then(|cp| cp.get("fan_mode"))
-        .is_some();
+    let had_fan_mode = raw.get("cooling_pad").and_then(|cp| cp.get("fan_mode")).is_some();
     if !had_fan_mode {
         let fan_on = raw
             .get("cooling_pad")
             .and_then(|cp| cp.get("fan_on"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        config.cooling_pad.fan_mode = if fan_on {
-            "manual".to_string()
-        } else {
-            "off".to_string()
-        };
+        config.cooling_pad.fan_mode = if fan_on { "manual".to_string() } else { "off".to_string() };
     }
 
-    let had_follow = raw
-        .get("cooling_pad")
-        .and_then(|cp| cp.get("follow_laptop_fan"))
-        .is_some();
+    let had_follow = raw.get("cooling_pad").and_then(|cp| cp.get("follow_laptop_fan")).is_some();
     if !had_follow {
         config.cooling_pad.follow_laptop_fan = default_follow_laptop_fan();
     }
@@ -367,6 +397,10 @@ fn config_file_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librazer::types::{
+        BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode,
+        PerfMode,
+    };
 
     #[test]
     fn migrates_v1_fan_on_and_sets_follow_default() {
@@ -393,7 +427,8 @@ mod tests {
     fn loads_v2_follow_laptop_fan() {
         let mut cfg = AppConfig::default();
         cfg.cooling_pad.follow_laptop_fan = false;
-        let loaded: AppConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        let loaded: AppConfig =
+            serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
         assert!(!loaded.cooling_pad.follow_laptop_fan);
     }
 
@@ -406,5 +441,137 @@ mod tests {
         assert_eq!(cfg.auto_turn_on_delay_secs, DEFAULT_TURN_ON_DELAY_SECS);
         assert_eq!(cfg.auto_rpm_slew_up_per_sec, DEFAULT_RPM_SLEW_UP_PER_SEC);
         assert_eq!(cfg.auto_temp_hysteresis_c, DEFAULT_TEMP_HYSTERESIS_C);
+    }
+
+    #[test]
+    fn complete_non_default_config_round_trip_is_stable() {
+        let ac_profile = CompleteDeviceState {
+            perf_mode: PerfMode::Custom,
+            fan_mode: FanMode::Manual,
+            fan_rpm: Some(4100),
+            logo_mode: LogoMode::Breathing,
+            keyboard_brightness: 73,
+            lights_always_on: LightsAlwaysOn::Enable,
+            battery_care: BatteryCare::Percent50,
+            cpu_boost: Some(CpuBoost::High),
+            gpu_boost: Some(GpuBoost::Medium),
+            max_fan_speed: Some(MaxFanSpeedMode::Enable),
+        };
+        let battery_profile = CompleteDeviceState {
+            perf_mode: PerfMode::Silent,
+            fan_mode: FanMode::Manual,
+            fan_rpm: Some(2200),
+            logo_mode: LogoMode::Static,
+            keyboard_brightness: 17,
+            lights_always_on: LightsAlwaysOn::Enable,
+            battery_care: BatteryCare::Disable,
+            cpu_boost: Some(CpuBoost::Low),
+            gpu_boost: Some(GpuBoost::High),
+            max_fan_speed: Some(MaxFanSpeedMode::Disable),
+        };
+        let cooling_pad = CoolingPadConfig {
+            fan_mode: "auto".into(),
+            manual_rpm: 1900,
+            auto_min_rpm: 700,
+            auto_max_rpm: 3100,
+            auto_off_below_c: 51.5,
+            auto_full_above_c: 82.5,
+            auto_turn_on_delay_secs: 2.5,
+            auto_turn_off_delay_secs: 7.5,
+            auto_overcool_hold_secs: 11.5,
+            auto_temp_ema_alpha: 0.42,
+            auto_rpm_slew_up_per_sec: 333,
+            auto_rpm_slew_down_per_sec: 222,
+            auto_follow_temp_margin_c: 4.5,
+            auto_temp_hysteresis_c: 1.75,
+            follow_laptop_fan: false,
+            lighting_mode: "Spectrum".into(),
+            color: [12, 34, 56],
+            brightness_step: 5,
+        };
+        let expected = AppConfig {
+            version: CONFIG_VERSION,
+            auto_switch_enabled: false,
+            ac_profile,
+            battery_profile,
+            auto_fan_limit_enabled: true,
+            auto_fan_max_rpm: 3875,
+            debug_enabled: true,
+            minimize_to_tray: false,
+            run_at_startup: false,
+            cooling_pad,
+        };
+
+        let json = serde_json::to_string_pretty(&expected).unwrap();
+        let (actual, migrated) = AppConfig::parse(&json).unwrap();
+
+        assert!(!migrated);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn migrated_v1_config_is_stable_after_rewrite() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw["version"] = Value::from(1);
+        let cooling_pad = raw["cooling_pad"].as_object_mut().unwrap();
+        cooling_pad.remove("fan_mode");
+        cooling_pad.remove("follow_laptop_fan");
+        cooling_pad.insert("fan_on".into(), Value::from(true));
+
+        let (migrated, did_migrate) = AppConfig::parse(&raw.to_string()).unwrap();
+        assert!(did_migrate);
+        assert_eq!(migrated.version, CONFIG_VERSION);
+        assert_eq!(migrated.cooling_pad.fan_mode, "manual");
+        assert!(migrated.cooling_pad.follow_laptop_fan);
+
+        let (reloaded, did_migrate_again) =
+            AppConfig::parse(&serde_json::to_string(&migrated).unwrap()).unwrap();
+        assert!(!did_migrate_again);
+        assert_eq!(reloaded, migrated);
+    }
+
+    #[test]
+    fn cooling_pad_runtime_mapping_preserves_every_field() {
+        let mut expected = CoolingPadConfig::default();
+        expected.fan_mode = "manual".into();
+        expected.manual_rpm = 1777;
+        expected.auto_min_rpm = 611;
+        expected.auto_max_rpm = 2999;
+        expected.auto_off_below_c = 49.5;
+        expected.auto_full_above_c = 79.5;
+        expected.auto_turn_on_delay_secs = 3.25;
+        expected.auto_turn_off_delay_secs = 8.25;
+        expected.auto_overcool_hold_secs = 14.0;
+        expected.auto_temp_ema_alpha = 0.55;
+        expected.auto_rpm_slew_up_per_sec = 456;
+        expected.auto_rpm_slew_down_per_sec = 321;
+        expected.auto_follow_temp_margin_c = 6.5;
+        expected.auto_temp_hysteresis_c = 2.25;
+        expected.follow_laptop_fan = false;
+        expected.lighting_mode = "Wave".into();
+        expected.color = [9, 8, 7];
+        expected.brightness_step = 3;
+
+        let runtime = CoolingPadRuntime::from(&expected);
+        assert_eq!(CoolingPadConfig::from(runtime), expected);
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_config() {
+        let unique = format!(
+            "r-helper-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        fs::write(&path, b"old").unwrap();
+
+        write_config_atomically(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

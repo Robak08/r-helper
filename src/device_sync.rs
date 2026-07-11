@@ -34,9 +34,7 @@ impl Default for DeviceStatus {
 
 impl DeviceStatus {
     pub fn performance_mode_label(&self) -> String {
-        self.perf_mode
-            .map(|m| perf_mode_to_string(m))
-            .unwrap_or_else(|| "Reading...".to_string())
+        self.perf_mode.map(|m| perf_mode_to_string(m)).unwrap_or_else(|| "Reading...".to_string())
     }
 
     pub fn fan_speed_label(&self) -> String {
@@ -102,7 +100,6 @@ pub fn string_to_logo_mode(mode: &str) -> Option<LogoMode> {
         _ => None,
     }
 }
-
 
 pub fn apply_fan_status(
     ctx: &mut StatusApplyContext<'_>,

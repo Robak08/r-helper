@@ -52,7 +52,11 @@ pub fn render_header(
     tab_action
 }
 
-fn render_tab_bar(ui: &mut egui::Ui, active_tab: AppTab, show_cooling_pad_tab: bool) -> TabBarAction {
+fn render_tab_bar(
+    ui: &mut egui::Ui,
+    active_tab: AppTab,
+    show_cooling_pad_tab: bool,
+) -> TabBarAction {
     let mut action = TabBarAction::default();
 
     ui.horizontal(|ui| {
@@ -60,9 +64,7 @@ fn render_tab_bar(ui: &mut egui::Ui, active_tab: AppTab, show_cooling_pad_tab: b
             action.selected_tab = Some(AppTab::Laptop);
         }
         if show_cooling_pad_tab
-            && ui
-                .selectable_label(active_tab == AppTab::CoolingPad, "Cooling Pad")
-                .clicked()
+            && ui.selectable_label(active_tab == AppTab::CoolingPad, "Cooling Pad").clicked()
         {
             action.selected_tab = Some(AppTab::CoolingPad);
         }

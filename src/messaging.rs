@@ -97,11 +97,7 @@ impl MessageManager {
     /// Get the current message that should be displayed
     pub fn get_current_message(&self) -> Option<&UserMessage> {
         if let Some(current) = &self.current_message {
-            if current.is_expired() {
-                None
-            } else {
-                Some(current)
-            }
+            if current.is_expired() { None } else { Some(current) }
         } else {
             None
         }

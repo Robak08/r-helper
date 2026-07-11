@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
@@ -17,6 +17,8 @@ pub struct RepaintWake {
     session: Arc<SessionState>,
     desired: AtomicBool,
     running: AtomicBool,
+    stopped: AtomicBool,
+    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl RepaintWake {
@@ -26,6 +28,8 @@ impl RepaintWake {
             session,
             desired: AtomicBool::new(false),
             running: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            handle: std::sync::Mutex::new(None),
         })
     }
 
@@ -37,22 +41,56 @@ impl RepaintWake {
     }
 
     fn ensure_thread(self: &Arc<Self>) {
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
         if self.running.swap(true, Ordering::SeqCst) {
             return;
         }
 
+        if let Ok(mut handle) = self.handle.lock() {
+            if let Some(previous) = handle.take() {
+                let _ = previous.join();
+            }
+        }
+
         let wake = Arc::clone(self);
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("ui-repaint-wake".into())
             .spawn(move || {
-                while wake.desired.load(Ordering::Relaxed) {
-                    if !wake.session.locked.load(Ordering::Relaxed) {
-                        wake.ctx.request_repaint();
+                loop {
+                    while wake.desired.load(Ordering::Acquire)
+                        && !wake.stopped.load(Ordering::Acquire)
+                    {
+                        if !wake.session.locked.load(Ordering::Relaxed) {
+                            wake.ctx.request_repaint();
+                        }
+                        std::thread::sleep(WAKE_INTERVAL);
                     }
-                    std::thread::sleep(WAKE_INTERVAL);
+
+                    wake.running.store(false, Ordering::SeqCst);
+                    if wake.desired.load(Ordering::Acquire)
+                        && !wake.stopped.load(Ordering::Acquire)
+                        && !wake.running.swap(true, Ordering::SeqCst)
+                    {
+                        continue;
+                    }
+                    break;
                 }
-                wake.running.store(false, Ordering::SeqCst);
             })
             .expect("ui repaint wake thread");
+        if let Ok(mut slot) = self.handle.lock() {
+            *slot = Some(handle);
+        }
+    }
+
+    pub fn stop_and_join(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.desired.store(false, Ordering::Release);
+        if let Ok(mut handle) = self.handle.lock() {
+            if let Some(handle) = handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }

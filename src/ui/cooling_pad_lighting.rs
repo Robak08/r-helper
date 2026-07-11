@@ -12,12 +12,7 @@ pub struct CoolingPadLightingAction {
 
 impl Default for CoolingPadLightingAction {
     fn default() -> Self {
-        Self {
-            mode: None,
-            brightness: None,
-            apply_color: false,
-            slider_active: None,
-        }
+        Self { mode: None, brightness: None, apply_color: false, slider_active: None }
     }
 }
 

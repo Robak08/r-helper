@@ -3,8 +3,6 @@
 use anyhow::Result;
 use std::process::Command;
 
-pub use anyhow;
-
 // System Command Execution
 
 /// Execute a PowerShell script with consistent configuration

@@ -27,8 +27,24 @@ A Windows application to control Razer Blade settings w/o Synapse.
 
 ## Building
 
+Release build with versioned packaging (recommended):
+
 ```powershell
-cargo build --release
+.\scripts\package-release.ps1
+```
+
+Or use the cargo wrapper, which copies to `dist/` after `cargo build --release` finishes:
+
+```powershell
+.\scripts\cargo.ps1 build --release
+```
+
+Plain `cargo build --release` also copies to `dist/rhelper-<version>.exe` (e.g. `dist/rhelper-0_8_6.exe`) when the project is recompiled. Set `RHELPER_SKIP_RELEASE_PACKAGING=1` to disable automatic packaging.
+
+To refresh `dist/` without recompiling:
+
+```powershell
+.\scripts\copy-release.ps1
 ```
 
 ## Architecture

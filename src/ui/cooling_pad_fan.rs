@@ -66,14 +66,18 @@ pub fn render_cooling_pad_fan_section(
                 }
                 CoolingPadFanMode::Manual => {
                     if let Some(rpm) = display_rpm {
-                        ui.label(RichText::new(format!("{rpm}")).color(Color32::from_rgb(0, 180, 0)));
+                        ui.label(
+                            RichText::new(format!("{rpm}")).color(Color32::from_rgb(0, 180, 0)),
+                        );
                     } else {
                         ui.label(RichText::new("Off").weak());
                     }
                 }
                 CoolingPadFanMode::Auto => {
                     if let Some(rpm) = display_rpm {
-                        ui.label(RichText::new(format!("{rpm}")).color(Color32::from_rgb(0, 180, 0)));
+                        ui.label(
+                            RichText::new(format!("{rpm}")).color(Color32::from_rgb(0, 180, 0)),
+                        );
                     } else {
                         ui.label(
                             RichText::new(format!("Off · {}–{}", *auto_min_rpm, *auto_max_rpm))
@@ -133,10 +137,7 @@ pub fn render_cooling_pad_fan_section(
             ui.horizontal(|ui| {
                 ui.label("Off below:");
                 let mut off = *auto_off_below_c;
-                if ui
-                    .add(egui::Slider::new(&mut off, 40.0..=75.0).suffix("°C"))
-                    .changed()
-                {
+                if ui.add(egui::Slider::new(&mut off, 40.0..=75.0).suffix("°C")).changed() {
                     *auto_off_below_c = off;
                     action = CoolingPadFanAction::SetAutoOffBelowC(off);
                 }
@@ -182,10 +183,7 @@ pub fn render_cooling_pad_fan_section(
                 ui.label("Full speed above:");
                 let mut full = *auto_full_above_c;
                 let min_full = *auto_off_below_c + 5.0;
-                if ui
-                    .add(egui::Slider::new(&mut full, min_full..=95.0).suffix("°C"))
-                    .changed()
-                {
+                if ui.add(egui::Slider::new(&mut full, min_full..=95.0).suffix("°C")).changed() {
                     *auto_full_above_c = full.max(min_full);
                     action = CoolingPadFanAction::SetAutoFullAboveC(*auto_full_above_c);
                 }

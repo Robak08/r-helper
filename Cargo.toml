@@ -1,6 +1,6 @@
 [package]
 name = "r-helper"
-version = "0.8.5"
+version = "0.8.6"
 edition = "2024"
 description = "R-Helper - Razer Blade control interface"
 authors = ["Fatalution"]
@@ -30,6 +30,7 @@ windows = { version = "0.62.0", features = [
     "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
@@ -52,3 +53,8 @@ members = [
 default-members = [
     ".",          # build only the GUI by default (root crate)
 ]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -31,7 +31,6 @@ impl SharedDevice {
     pub fn try_with_mut<R>(&self, f: impl FnOnce(&mut Device) -> R) -> Option<R> {
         self.0.try_lock().ok().map(|mut guard| f(&mut *guard))
     }
-
 }
 
 /// Run a device command with standard error handling.

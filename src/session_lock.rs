@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
@@ -10,6 +10,7 @@ use crate::cooling_pad_enforce::CoolingPadEnforceShared;
 use crate::device_handle::SharedDevice;
 use crate::laptop_fan_cap::LaptopFanCapShared;
 use crate::ui::cooling_pad_fan::CoolingPadFanMode;
+use crate::worker::StopSignal;
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -19,9 +20,7 @@ pub struct SessionState {
 
 impl Default for SessionState {
     fn default() -> Self {
-        Self {
-            locked: AtomicBool::new(false),
-        }
+        Self { locked: AtomicBool::new(false) }
     }
 }
 
@@ -50,13 +49,12 @@ pub fn new_device_slot() -> DeviceSlot {
 pub fn is_session_locked() -> bool {
     use windows::Win32::Foundation::{GetLastError, HANDLE};
     use windows::Win32::System::StationsAndDesktops::{
-        CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_CONTROL_FLAGS,
-        DESKTOP_READOBJECTS, UOI_NAME,
+        CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetUserObjectInformationW,
+        OpenInputDesktop, UOI_NAME,
     };
 
     unsafe {
-        let desktop = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
-        {
+        let desktop = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
             Ok(d) => d,
             Err(_) => return false,
         };
@@ -96,7 +94,8 @@ pub fn spawn_session_lock_monitor(
     laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
     cooling_pad_settings: Arc<Mutex<CoolingPadEnforceShared>>,
     pending_cooling_pad_restore: Arc<AtomicBool>,
-) {
+    stop: Arc<StopSignal>,
+) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("session-lock-monitor".into())
         .spawn(move || {
@@ -104,9 +103,7 @@ pub fn spawn_session_lock_monitor(
             let mut was_locked = is_session_locked();
             session.locked.store(was_locked, Ordering::Relaxed);
 
-            loop {
-                std::thread::sleep(MONITOR_INTERVAL);
-
+            while !stop.wait(MONITOR_INTERVAL) {
                 let locked = is_session_locked();
                 if locked == was_locked {
                     continue;
@@ -115,10 +112,7 @@ pub fn spawn_session_lock_monitor(
                 was_locked = locked;
                 session.locked.store(locked, Ordering::Relaxed);
 
-                let device = device_slot
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone());
+                let device = device_slot.lock().ok().and_then(|guard| guard.clone());
 
                 if locked {
                     if let Some(ref dev) = device {
@@ -145,7 +139,7 @@ pub fn spawn_session_lock_monitor(
                 }
             }
         })
-        .expect("session lock monitor thread");
+        .expect("session lock monitor thread")
 }
 
 fn read_laptop_fan_mode(device: &Device) -> Option<(FanMode, Option<u16>)> {
@@ -166,7 +160,7 @@ fn apply_lock_mitigations(
     cooling_pad_settings: &Arc<Mutex<CoolingPadEnforceShared>>,
     snapshots: &mut SessionSnapshots,
 ) {
-    if let Ok(mut cap) = laptop_fan_cap.lock() {
+    let release_cap_to_auto = if let Ok(mut cap) = laptop_fan_cap.lock() {
         if cap.cap_active {
             snapshots.laptop_cap = Some(LaptopCapSnapshot {
                 cap_active: cap.cap_active,
@@ -175,10 +169,17 @@ fn apply_lock_mitigations(
             });
             cap.skip = true;
             cap.cap_active = false;
-            if let Some(d) = device.with_mut(|d| command::set_fan_mode(d, FanMode::Auto)) {
-                if let Err(e) = d {
-                    eprintln!("session lock: failed to release laptop fan cap to Auto: {e}");
-                }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if release_cap_to_auto {
+        if let Some(d) = device.with_mut(|d| command::set_fan_mode(d, FanMode::Auto)) {
+            if let Err(e) = d {
+                eprintln!("session lock: failed to release laptop fan cap to Auto: {e}");
             }
         }
     }
@@ -189,9 +190,7 @@ fn apply_lock_mitigations(
                 if let Some(rpm) = rpm {
                     snapshots.laptop_manual_rpm = Some(rpm);
                 }
-                if let Some(result) =
-                    device.with_mut(|d| command::set_fan_mode(d, FanMode::Auto))
-                {
+                if let Some(result) = device.with_mut(|d| command::set_fan_mode(d, FanMode::Auto)) {
                     if let Err(e) = result {
                         eprintln!("session lock: failed to set laptop fan Auto: {e}");
                     }
