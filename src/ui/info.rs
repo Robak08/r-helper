@@ -1,5 +1,6 @@
 use eframe::egui::{self, RichText, Vec2};
 
+use crate::bluetooth::{normalized_device_name, BluetoothHeadsetSummary};
 use crate::ui::temp::info_temp_row;
 use librazer::enumerate::{RazerDeviceKind, RazerDeviceSummary};
 use librazer::types::BatteryCare;
@@ -59,36 +60,35 @@ pub fn render_info_tab(
     info: &LaptopInfoView,
     cooling_pad: Option<&CoolingPadInfoView>,
     razer_devices: &[RazerDeviceSummary],
+    bluetooth_headsets: &[BluetoothHeadsetSummary],
 ) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.group(|ui| {
             ui.label(RichText::new("💻 This laptop").strong());
             ui.separator();
 
-            egui::ScrollArea::horizontal()
-                .id_salt("laptop_info_hscroll")
-                .show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        let content_width = laptop_content_width(info);
-                        ui.set_min_width(content_width.max(ui.available_width()));
-                        info_row(ui, "Model", &info.model);
-                        if let Some(sku) = &info.sku {
-                            info_row(ui, "SKU", sku);
-                        }
-                        if let Some(pid) = &info.pid {
-                            info_row(ui, "USB PID", pid);
-                        }
-                        info_row(ui, "CPU", &info.cpu);
-                        if let Some(ram) = info.ram_gb {
-                            info_row(ui, "RAM", &format!("{ram} GB"));
-                        }
-                        if !info.gpus.is_empty() {
-                            info_row(ui, "GPU", &info.gpus.join(", "));
-                        }
-                        info_temp_row(ui, "CPU temp", info.cpu_avg_temp_c);
-                        info_temp_row(ui, "GPU temp", info.gpu_avg_temp_c);
-                    });
+            egui::ScrollArea::horizontal().id_salt("laptop_info_hscroll").show(ui, |ui| {
+                ui.vertical(|ui| {
+                    let content_width = laptop_content_width(info);
+                    ui.set_min_width(content_width.max(ui.available_width()));
+                    info_row(ui, "Model", &info.model);
+                    if let Some(sku) = &info.sku {
+                        info_row(ui, "SKU", sku);
+                    }
+                    if let Some(pid) = &info.pid {
+                        info_row(ui, "USB PID", pid);
+                    }
+                    info_row(ui, "CPU", &info.cpu);
+                    if let Some(ram) = info.ram_gb {
+                        info_row(ui, "RAM", &format!("{ram} GB"));
+                    }
+                    if !info.gpus.is_empty() {
+                        info_row(ui, "GPU", &info.gpus.join(", "));
+                    }
+                    info_temp_row(ui, "CPU temp", info.cpu_avg_temp_c);
+                    info_temp_row(ui, "GPU temp", info.gpu_avg_temp_c);
                 });
+            });
         });
 
         ui.add_space(8.0);
@@ -100,9 +100,7 @@ pub fn render_info_tab(
             match info.battery_percent {
                 Some(pct) => {
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new("Charge:").weak()).selectable(false),
-                        );
+                        ui.add(egui::Label::new(RichText::new("Charge:").weak()).selectable(false));
                         compact_progress_bar(ui, pct);
                     });
                 }
@@ -128,7 +126,7 @@ pub fn render_info_tab(
             ui.add_space(8.0);
         }
 
-        render_razer_devices(ui, razer_devices);
+        render_razer_devices(ui, razer_devices, bluetooth_headsets);
     });
 }
 
@@ -159,46 +157,88 @@ fn render_cooling_pad_info(ui: &mut egui::Ui, pad: &CoolingPadInfoView) {
     });
 }
 
-fn render_razer_devices(ui: &mut egui::Ui, devices: &[RazerDeviceSummary]) {
+fn render_razer_devices(
+    ui: &mut egui::Ui,
+    devices: &[RazerDeviceSummary],
+    bluetooth_headsets: &[BluetoothHeadsetSummary],
+) {
     ui.group(|ui| {
         ui.label(RichText::new("🎧 Connected peripherals").strong());
         ui.separator();
 
-        if devices.is_empty() {
-            ui.label(RichText::new("No Razer peripherals detected.").weak());
+        let bluetooth_headsets = bluetooth_headsets
+            .iter()
+            .filter(|headset| !duplicates_usb_headset(&headset.name, devices))
+            .collect::<Vec<_>>();
+
+        if devices.is_empty() && bluetooth_headsets.is_empty() {
+            ui.label(RichText::new("No peripherals detected.").weak());
             return;
         }
 
-        egui::Grid::new("razer_device_grid")
-            .num_columns(3)
-            .spacing([10.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(RichText::new("Device").strong());
-                ui.label(RichText::new("Battery").strong());
-                ui.label(RichText::new("Status").strong());
-                ui.end_row();
+        egui::Grid::new("razer_device_grid").num_columns(3).spacing([10.0, 4.0]).show(ui, |ui| {
+            ui.label(RichText::new("Device").strong());
+            ui.label(RichText::new("Battery").strong());
+            ui.label(RichText::new("Status").strong());
+            ui.end_row();
 
-                for device in devices {
-                    ui.label(&device.name);
+            for device in devices {
+                ui.label(&device.name);
 
-                    match device.battery_percent {
-                        Some(pct) => {
-                            compact_progress_bar(ui, pct);
-                        }
-                        None if device.battery_available => {
-                            ui.label("—");
-                        }
-                        None => {
-                            ui.label(RichText::new("N/A").weak());
-                        }
+                match device.battery_percent {
+                    Some(pct) => {
+                        compact_progress_bar(ui, pct);
                     }
-
-                    let status = peripheral_status(device);
-                    ui.label(status);
-                    ui.end_row();
+                    None if device.battery_available => {
+                        ui.label("—");
+                    }
+                    None => {
+                        ui.label(RichText::new("N/A").weak());
+                    }
                 }
-            });
+
+                let status = peripheral_status(device);
+                ui.label(status);
+                ui.end_row();
+            }
+
+            for headset in bluetooth_headsets {
+                ui.label(&headset.name);
+                match headset.battery_percent {
+                    Some(pct) => compact_progress_bar(ui, pct),
+                    None => {
+                        ui.label(RichText::new("N/A").weak());
+                    }
+                }
+                ui.label(bluetooth_status(headset));
+                ui.end_row();
+            }
+        });
     });
+}
+
+fn duplicates_usb_headset(name: &str, devices: &[RazerDeviceSummary]) -> bool {
+    devices.iter().any(|device| {
+        device.kind == RazerDeviceKind::Headset && same_normalized_device_name(name, &device.name)
+    })
+}
+
+fn same_normalized_device_name(left: &str, right: &str) -> bool {
+    let left = normalized_device_name(left);
+    let right = normalized_device_name(right);
+    !left.is_empty()
+        && !right.is_empty()
+        && (left == right
+            || (left.len() >= 6 && right.contains(&left))
+            || (right.len() >= 6 && left.contains(&right)))
+}
+
+fn bluetooth_status(headset: &BluetoothHeadsetSummary) -> &'static str {
+    match headset.battery_percent {
+        Some(pct) if pct <= 20 => "Bluetooth · Low",
+        Some(_) => "Bluetooth · OK",
+        None => "Bluetooth · Connected",
+    }
 }
 
 fn peripheral_status(device: &RazerDeviceSummary) -> &'static str {
@@ -261,7 +301,25 @@ fn format_time_mins(mins: u32) -> String {
 impl LaptopInfoView {
     pub fn charge_limit_from_care(care: BatteryCare) -> Option<u8> {
         let pct = care.to_percent();
-        if pct >= 100 { None } else { Some(pct) }
+        if pct >= 100 {
+            None
+        } else {
+            Some(pct)
+        }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deduplicates_usb_and_bluetooth_transport_names() {
+        assert!(same_normalized_device_name(
+            "Razer Barracuda X Bluetooth Stereo",
+            "Razer Barracuda X"
+        ));
+        assert!(same_normalized_device_name("Razer BlackShark V3 BT", "BlackShark V3"));
+        assert!(!same_normalized_device_name("Razer Barracuda X", "Razer Kraken Kitty"));
+    }
+}

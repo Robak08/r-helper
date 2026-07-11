@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod bluetooth;
 mod config;
 mod cooling_pad_apply;
 mod cooling_pad_auto;
@@ -44,32 +45,33 @@ use librazer::{
 };
 use strum::IntoEnumIterator;
 
-use device::CompleteDeviceState;
-use device_sync::{
-    apply_fan_status, apply_state_to_status, perf_mode_to_string,
-    string_to_logo_mode, string_to_perf_mode, DeviceStatus, StatusApplyContext, StatusApplyOptions,
-};
+use bluetooth::{spawn_bluetooth_headset_poller, BluetoothHeadsetSummary};
 use cooling_pad_auto::{
     clamp_auto_state_to_limits, clear_laptop_follow_smoothing, compute_combined_auto,
     CoolingPadAutoInputs, CoolingPadAutoOutput, CoolingPadAutoState,
 };
 use cooling_pad_enforce::CoolingPadEnforceContext;
 use cooling_pad_handle::SharedCoolingPad;
+use device::CompleteDeviceState;
+use device_handle::execute_command;
 use device_handle::SharedDevice;
 use device_poll::{
     spawn_cooling_pad_poller, spawn_device_poller, CoolingPadPollSnapshot, DevicePollSnapshot,
 };
-use laptop_fan_cap::{spawn_laptop_fan_cap_enforcer, LaptopFanCapShared};
-use session_lock::{new_device_slot, spawn_session_lock_monitor, DeviceSlot, SessionState};
+use device_sync::{
+    apply_fan_status, apply_state_to_status, perf_mode_to_string, string_to_logo_mode,
+    string_to_perf_mode, DeviceStatus, StatusApplyContext, StatusApplyOptions,
+};
 use hid_enum_poll::{spawn_hid_enum_poller, HidEnumMessage};
+use laptop_fan_cap::{spawn_laptop_fan_cap_enforcer, LaptopFanCapShared};
 use messaging::{error_message, status_message, MessageManager};
 use power::{get_battery_status, get_power_state, BatteryStatus};
+use session_lock::{new_device_slot, spawn_session_lock_monitor, DeviceSlot, SessionState};
 use system::{get_system_specs, resolve_device_model, SystemSpecs, ThermalSnapshot};
 use thermal_poll::spawn_thermal_poller;
 use ui::cooling_pad_fan::CoolingPadFanMode;
 use ui::header::{AppTab, TabBarAction};
 use ui::info::{render_info_tab, CoolingPadInfoView, LaptopInfoView};
-use device_handle::execute_command;
 
 // Dynamic app metadata from Cargo
 const APP_NAME: &str = "R-Helper";
@@ -147,8 +149,10 @@ struct RazerGuiApp {
     battery_status: BatteryStatus,
     last_battery_refresh: std::time::Instant,
     razer_devices: Vec<RazerDeviceSummary>,
+    bluetooth_headsets: Vec<BluetoothHeadsetSummary>,
     last_razer_devices_refresh: std::time::Instant,
     hid_enum_receiver: Option<mpsc::Receiver<HidEnumMessage>>,
+    bluetooth_headset_receiver: Option<mpsc::Receiver<Vec<BluetoothHeadsetSummary>>>,
     cooling_pad_usb_present: bool,
 
     device_hydrated: bool,
@@ -286,10 +290,10 @@ impl RazerGuiApp {
             settings.auto_follow_temp_margin_c = self.cooling_pad_auto_follow_temp_margin_c;
             settings.auto_temp_hysteresis_c = self.cooling_pad_auto_temp_hysteresis_c;
             settings.laptop_fan_follow_enabled = self.cooling_pad_follow_laptop_fan;
-            let min = settings.auto_min_rpm.clamp(librazer::cooling_pad::MIN_RPM, librazer::cooling_pad::MAX_RPM);
-            let max = settings
-                .auto_max_rpm
-                .clamp(min, librazer::cooling_pad::MAX_RPM);
+            let min = settings
+                .auto_min_rpm
+                .clamp(librazer::cooling_pad::MIN_RPM, librazer::cooling_pad::MAX_RPM);
+            let max = settings.auto_max_rpm.clamp(min, librazer::cooling_pad::MAX_RPM);
             clamp_auto_state_to_limits(&mut settings.auto_state, min, max);
         }
         if let Ok(mut pad) = self.cooling_pad_enforce.pad.lock() {
@@ -340,12 +344,7 @@ impl RazerGuiApp {
 
     fn apply_device_fan_status(&mut self, fan_mode: FanMode, set_rpm: Option<u16>) -> bool {
         let is_user_auto = self.is_user_auto_mode();
-        apply_fan_status(
-            &mut self.status_apply_ctx(),
-            fan_mode,
-            set_rpm,
-            is_user_auto,
-        )
+        apply_fan_status(&mut self.status_apply_ctx(), fan_mode, set_rpm, is_user_auto)
     }
 
     fn read_current_fan_state(device: &Device) -> (FanMode, Option<u16>) {
@@ -442,9 +441,11 @@ impl RazerGuiApp {
             battery_status: get_battery_status(),
             last_battery_refresh: now,
             razer_devices: Vec::new(),
+            bluetooth_headsets: Vec::new(),
             last_razer_devices_refresh: std::time::Instant::now()
                 - std::time::Duration::from_secs(INFO_DEVICES_REFRESH_SECS as u64),
             hid_enum_receiver: None,
+            bluetooth_headset_receiver: None,
             cooling_pad_usb_present: false,
 
             device_hydrated: false,
@@ -506,6 +507,7 @@ impl RazerGuiApp {
         app.start_background_initialization(init_sender);
         app.start_thermal_poller();
         app.start_hid_enum_poller();
+        app.start_bluetooth_headset_poller();
 
         app
     }
@@ -514,6 +516,34 @@ impl RazerGuiApp {
         let (tx, rx) = mpsc::channel();
         self.hid_enum_receiver = Some(rx);
         spawn_hid_enum_poller(tx);
+    }
+
+    fn start_bluetooth_headset_poller(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.bluetooth_headset_receiver = Some(rx);
+        spawn_bluetooth_headset_poller(tx);
+    }
+
+    fn process_bluetooth_headset_messages(&mut self, ctx: &egui::Context) -> bool {
+        let Some(rx) = &self.bluetooth_headset_receiver else {
+            return false;
+        };
+
+        let mut latest = None;
+        while let Ok(headsets) = rx.try_recv() {
+            latest = Some(headsets);
+        }
+
+        let Some(headsets) = latest else {
+            return false;
+        };
+        if self.bluetooth_headsets == headsets {
+            return false;
+        }
+
+        self.bluetooth_headsets = headsets;
+        ctx.request_repaint();
+        true
     }
 
     fn process_hid_enum_messages(&mut self, ctx: &egui::Context) -> bool {
@@ -562,10 +592,7 @@ impl RazerGuiApp {
     }
 
     fn start_thermal_poller(&mut self) {
-        spawn_thermal_poller(
-            Arc::clone(&self.poll_slow),
-            Arc::clone(&self.shared_thermal),
-        );
+        spawn_thermal_poller(Arc::clone(&self.poll_slow), Arc::clone(&self.shared_thermal));
     }
 
     fn refresh_thermal_from_shared(&mut self, ctx: &egui::Context) -> bool {
@@ -656,10 +683,8 @@ impl RazerGuiApp {
             return Ok(());
         }
         let (state, fan_actual_rpm) = {
-            let shared = self
-                .device
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("no device connected"))?;
+            let shared =
+                self.device.as_ref().ok_or_else(|| anyhow::anyhow!("no device connected"))?;
             shared
                 .with(|device| {
                     let state = CompleteDeviceState::read_from_device(device)?;
@@ -677,11 +702,7 @@ impl RazerGuiApp {
     }
 
     fn active_profile_fan_mode(&self) -> FanMode {
-        let profile = if self.ac_power {
-            &self.ac_profile
-        } else {
-            &self.battery_profile
-        };
+        let profile = if self.ac_power { &self.ac_profile } else { &self.battery_profile };
         profile.fan_mode
     }
 
@@ -691,11 +712,7 @@ impl RazerGuiApp {
             return;
         }
 
-        let cap_active = self
-            .laptop_fan_cap
-            .lock()
-            .map(|cap| cap.cap_active)
-            .unwrap_or(false);
+        let cap_active = self.laptop_fan_cap.lock().map(|cap| cap.cap_active).unwrap_or(false);
         if self.auto_fan_cap_override != cap_active {
             self.auto_fan_cap_override = cap_active;
         }
@@ -893,11 +910,7 @@ impl RazerGuiApp {
     }
 
     fn compute_cooling_pad_auto_output(&mut self) -> CoolingPadAutoOutput {
-        let dt = self
-            .last_cooling_pad_fan_enforce_time
-            .elapsed()
-            .as_secs_f32()
-            .clamp(0.05, 3.0);
+        let dt = self.last_cooling_pad_fan_enforce_time.elapsed().as_secs_f32().clamp(0.05, 3.0);
         let thermal = crate::thermal_poll::read_shared_thermal(&self.shared_thermal);
         let inputs = CoolingPadAutoInputs {
             cpu_temp_c: thermal.cpu_avg_c,
@@ -959,10 +972,7 @@ impl RazerGuiApp {
         let Some(pad) = self.cooling_pad.as_ref() else {
             return false;
         };
-        !self.cooling_pad_usb_present
-            || !pad
-                .with(|p| p.is_responsive())
-                .unwrap_or(false)
+        !self.cooling_pad_usb_present || !pad.with(|p| p.is_responsive()).unwrap_or(false)
     }
 
     fn process_poll_snapshots(&mut self, ctx: &egui::Context) -> bool {
@@ -1017,12 +1027,9 @@ impl RazerGuiApp {
         }
 
         if let Some(brightness) = snapshot.keyboard_brightness {
-            if !self.brightness_slider_active
-                && brightness != self.status.keyboard_brightness
-            {
+            if !self.brightness_slider_active && brightness != self.status.keyboard_brightness {
                 self.status.keyboard_brightness = brightness;
-                self.temp_brightness_step =
-                    ui::lighting::raw_brightness_to_step_index(brightness);
+                self.temp_brightness_step = ui::lighting::raw_brightness_to_step_index(brightness);
                 changed = true;
             }
         }
@@ -1137,10 +1144,8 @@ impl RazerGuiApp {
                     if let Some(device) = self.device.as_ref() {
                         device.with(|d| {
                             let info = d.info();
-                            self.system_specs.device_model = resolve_device_model(
-                                Some(&info.display_name),
-                                Some(info.pid),
-                            );
+                            self.system_specs.device_model =
+                                resolve_device_model(Some(&info.display_name), Some(info.pid));
                         });
                     } else {
                         self.system_specs.device_model = specs.device_model;
@@ -1262,9 +1267,8 @@ impl RazerGuiApp {
         );
 
         if let Some(device) = self.device.as_ref() {
-            self.status.fan_actual_rpm = device
-                .with(|d| get_fan_rpm_actual(d, librazer::types::FanZone::Zone1))
-                .flatten();
+            self.status.fan_actual_rpm =
+                device.with(|d| get_fan_rpm_actual(d, librazer::types::FanZone::Zone1)).flatten();
         }
     }
 
@@ -1525,8 +1529,7 @@ impl RazerGuiApp {
                     .ctx()
                     .data(|d| d.get_temp::<bool>("perf_hidden_show".into()).unwrap_or(false));
                 let showing_hidden = !current;
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp("perf_hidden_show".into(), showing_hidden));
+                ui.ctx().data_mut(|d| d.insert_temp("perf_hidden_show".into(), showing_hidden));
                 if showing_hidden {
                     self.available_performance_modes = PerfMode::iter().collect();
                 } else {
@@ -1688,21 +1691,14 @@ impl RazerGuiApp {
     }
 
     fn process_cooling_pad_enforce_flags(&mut self) {
-        if self
-            .cooling_pad_enforce
-            .pending_cooling_pad_restore
-            .swap(false, Ordering::Relaxed)
+        if self.cooling_pad_enforce.pending_cooling_pad_restore.swap(false, Ordering::Relaxed)
             && self.cooling_pad.is_some()
             && self.cooling_pad_fan_mode == CoolingPadFanMode::Manual
         {
             self.apply_cooling_pad_manual_fan(self.cooling_pad_manual_rpm);
         }
 
-        if self
-            .cooling_pad_enforce
-            .needs_redetect
-            .swap(false, Ordering::Relaxed)
-        {
+        if self.cooling_pad_enforce.needs_redetect.swap(false, Ordering::Relaxed) {
             self.redetect_cooling_pad();
         }
     }
@@ -1815,11 +1811,7 @@ impl RazerGuiApp {
 
         let key = egui::Id::new("max_fan_speed_enabled");
         let mut max_enabled = ui.ctx().data(|d| d.get_temp::<bool>(key).unwrap_or(false));
-        let cap_active = self
-            .laptop_fan_cap
-            .lock()
-            .map(|cap| cap.cap_active)
-            .unwrap_or(false);
+        let cap_active = self.laptop_fan_cap.lock().map(|cap| cap.cap_active).unwrap_or(false);
         let (action, new_toggle) = render_fan_section(
             ui,
             &self.status.fan_speed_label(),
@@ -2003,10 +1995,8 @@ impl RazerGuiApp {
                 info.sku = Some(descriptor.model_sku.clone());
                 info.pid = Some(format!("0x{:04x}", descriptor.pid));
                 if info.model == "Unknown" {
-                    info.model = resolve_device_model(
-                        Some(&descriptor.display_name),
-                        Some(descriptor.pid),
-                    );
+                    info.model =
+                        resolve_device_model(Some(&descriptor.display_name), Some(descriptor.pid));
                 }
             });
         }
@@ -2082,7 +2072,8 @@ impl RazerGuiApp {
             CoolingPadFanAction::SetMode(mode) => {
                 self.set_cooling_pad_fan_mode(mode);
             }
-            CoolingPadFanAction::SetManualRpm(rpm) | CoolingPadFanAction::ManualRpmDragging(rpm) => {
+            CoolingPadFanAction::SetManualRpm(rpm)
+            | CoolingPadFanAction::ManualRpmDragging(rpm) => {
                 self.cooling_pad_manual_rpm = rpm;
                 if matches!(action, CoolingPadFanAction::SetManualRpm(_))
                     && self.cooling_pad_fan_mode == CoolingPadFanMode::Manual
@@ -2226,9 +2217,8 @@ impl RazerGuiApp {
         let Some(pad) = self.cooling_pad.as_ref() else {
             return;
         };
-        let lighting_result = pad.with(|p| {
-            cooling_pad_apply::apply_pad_config_lighting(p, pad_mode, rgb, brightness)
-        });
+        let lighting_result = pad
+            .with(|p| cooling_pad_apply::apply_pad_config_lighting(p, pad_mode, rgb, brightness));
 
         match lighting_result {
             Some(Ok(())) => {
@@ -2321,7 +2311,9 @@ impl RazerGuiApp {
             Some(Ok(())) => {
                 self.mark_cooling_pad_lighting_changed();
                 self.schedule_cooling_pad_config_save();
-                self.set_optional_status_message(format!("Cooling pad brightness set to {brightness}"));
+                self.set_optional_status_message(format!(
+                    "Cooling pad brightness set to {brightness}"
+                ));
             }
             Some(Err(e)) => {
                 self.set_error_message(format!("Failed to set cooling pad brightness: {e}"));
@@ -2381,10 +2373,7 @@ impl RazerGuiApp {
     }
 
     fn is_window_visible(&self) -> bool {
-        self.tray_state
-            .as_ref()
-            .map(|s| s.is_visible())
-            .unwrap_or(true)
+        self.tray_state.as_ref().map(|s| s.is_visible()).unwrap_or(true)
     }
 
     fn sync_repaint_wake(&self, ctx: &egui::Context) {
@@ -2419,6 +2408,7 @@ impl RazerGuiApp {
         self.process_cooling_pad_poll_snapshots(ctx);
         self.process_thermal_snapshots(ctx);
         self.process_hid_enum_messages(ctx);
+        self.process_bluetooth_headset_messages(ctx);
         self.run_fan_enforcement();
         self.flush_pending_cooling_pad_config_save();
     }
@@ -2427,11 +2417,7 @@ impl RazerGuiApp {
 impl eframe::App for RazerGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
-        if self
-            .single_instance
-            .as_ref()
-            .is_some_and(|handle| handle.check_show())
-        {
+        if self.single_instance.as_ref().is_some_and(|handle| handle.check_show()) {
             if let Some(state) = self.tray_state.clone() {
                 state.show();
             }
@@ -2451,10 +2437,8 @@ impl eframe::App for RazerGuiApp {
             || self.brightness_slider_active
             || self.cooling_pad_brightness_slider_active
             || self.auto_fan_max_rpm_editing;
-        let needs_message_repaint = self
-            .message_manager
-            .get_current_message()
-            .is_some_and(|m| !m.is_expired());
+        let needs_message_repaint =
+            self.message_manager.get_current_message().is_some_and(|m| !m.is_expired());
         let needs_config_save_repaint = self.pending_cooling_pad_config_save.is_some();
 
         if fast_repaint || needs_message_repaint {
@@ -2473,17 +2457,15 @@ impl eframe::App for RazerGuiApp {
         }
 
         let tray_hidden = !self.is_window_visible();
-        self.poll_brightness_skip
-            .store(self.brightness_slider_active, Ordering::Relaxed);
+        self.poll_brightness_skip.store(self.brightness_slider_active, Ordering::Relaxed);
         self.poll_slow.store(tray_hidden, Ordering::Relaxed);
         self.process_poll_snapshots(ctx);
         self.process_cooling_pad_poll_snapshots(ctx);
         self.process_thermal_snapshots(ctx);
-        self.cooling_pad_poll_brightness_skip.store(
-            self.cooling_pad_brightness_slider_active,
-            Ordering::Relaxed,
-        );
+        self.cooling_pad_poll_brightness_skip
+            .store(self.cooling_pad_brightness_slider_active, Ordering::Relaxed);
         self.process_hid_enum_messages(ctx);
+        self.process_bluetooth_headset_messages(ctx);
 
         if self.active_tab == AppTab::CoolingPad && self.cooling_pad.is_none() {
             self.active_tab = AppTab::Laptop;
@@ -2574,80 +2556,82 @@ impl eframe::App for RazerGuiApp {
 
             match self.active_tab {
                 AppTab::Laptop if self.fully_initialized => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("laptop_tab")
-                        .show(ui, |ui| {
-                            self.render_performance_section(ui);
-                            ui.separator();
+                    egui::ScrollArea::vertical().id_salt("laptop_tab").show(ui, |ui| {
+                        self.render_performance_section(ui);
+                        ui.separator();
 
-                            self.render_fan_section(ui);
-                            ui.separator();
+                        self.render_fan_section(ui);
+                        ui.separator();
 
-                            self.render_lighting_section(ui);
-                            ui.separator();
+                        self.render_lighting_section(ui);
+                        ui.separator();
 
-                            self.render_battery_section(ui);
-                            ui.separator();
+                        self.render_battery_section(ui);
+                        ui.separator();
 
-                            self.render_profiles_section(ui);
-                            ui.add_space(16.0);
-                        });
+                        self.render_profiles_section(ui);
+                        ui.add_space(16.0);
+                    });
                 }
                 AppTab::Laptop => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("laptop_tab_loading")
-                        .show(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(24.0);
-                                ui.spinner();
-                                ui.label("Loading laptop controls…");
-                            });
+                    egui::ScrollArea::vertical().id_salt("laptop_tab_loading").show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(24.0);
+                            ui.spinner();
+                            ui.label("Loading laptop controls…");
                         });
+                    });
                 }
                 AppTab::CoolingPad if self.fully_initialized && self.cooling_pad.is_some() => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("cooling_pad_tab")
-                        .show(ui, |ui| {
-                            ui.group(|ui| {
-                                ui.add(egui::Label::new("🌡 Temperature").selectable(false));
-                                ui.separator();
-                                ui::temp::render_temp_pair(
-                                    ui,
-                                    self.thermal.cpu_avg_c,
-                                    self.thermal.gpu_avg_c,
-                                );
-                            });
-                            ui.add_space(4.0);
-                            self.render_cooling_pad_fan_section(ui);
+                    egui::ScrollArea::vertical().id_salt("cooling_pad_tab").show(ui, |ui| {
+                        ui.group(|ui| {
+                            ui.add(egui::Label::new("🌡 Temperature").selectable(false));
                             ui.separator();
-
-                            if self.cooling_pad_chroma_available {
-                                self.render_cooling_pad_lighting_section(ui);
-                            } else {
-                                ui.label("Lighting control is unavailable on this connection.");
-                            }
+                            ui::temp::render_temp_pair(
+                                ui,
+                                self.thermal.cpu_avg_c,
+                                self.thermal.gpu_avg_c,
+                            );
                         });
+                        ui.add_space(4.0);
+                        self.render_cooling_pad_fan_section(ui);
+                        ui.separator();
+
+                        if self.cooling_pad_chroma_available {
+                            self.render_cooling_pad_lighting_section(ui);
+                        } else {
+                            ui.label("Lighting control is unavailable on this connection.");
+                        }
+                    });
                 }
                 AppTab::CoolingPad => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("cooling_pad_tab_loading")
-                        .show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("cooling_pad_tab_loading").show(
+                        ui,
+                        |ui| {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(24.0);
                                 ui.spinner();
                                 ui.label("Loading…");
                             });
-                        });
+                        },
+                    );
                 }
                 AppTab::Info => {
                     let laptop_info = self.build_laptop_info();
                     let cooling_pad_info = self.build_cooling_pad_info();
-                    render_info_tab(ui, &laptop_info, cooling_pad_info.as_ref(), &self.razer_devices);
+                    render_info_tab(
+                        ui,
+                        &laptop_info,
+                        cooling_pad_info.as_ref(),
+                        &self.razer_devices,
+                        &self.bluetooth_headsets,
+                    );
                 }
             }
         });
         // Discrete height adjustment only when custom/debug controls appear or disappear
-        let custom_visible_now = self.device.is_some() && self.status.perf_mode == Some(PerfMode::Custom);
+        let custom_visible_now =
+            self.device.is_some() && self.status.perf_mode == Some(PerfMode::Custom);
         if self.base_window_height == 0.0 {
             // Capture initial (non-custom) height once
             self.base_window_height =
@@ -2756,10 +2740,8 @@ fn main() -> Result<(), eframe::Error> {
             let tray_guard = tray::TrayHandle::init(tray_icon, Arc::clone(&tray_state));
             let session_state = Arc::new(SessionState::default());
             let session_device_slot = new_device_slot();
-            let repaint_wake = ui_wake::RepaintWake::new(
-                cc.egui_ctx.clone(),
-                Arc::clone(&session_state),
-            );
+            let repaint_wake =
+                ui_wake::RepaintWake::new(cc.egui_ctx.clone(), Arc::clone(&session_state));
             let mut app = RazerGuiApp::new(
                 repaint_wake,
                 session_device_slot.clone(),
@@ -2776,12 +2758,10 @@ fn main() -> Result<(), eframe::Error> {
             #[cfg(windows)]
             {
                 let ctx = cc.egui_ctx.clone();
-                app.single_instance = Some(app_single_instance::start_primary(
-                    SINGLE_INSTANCE_ID,
-                    move || {
+                app.single_instance =
+                    Some(app_single_instance::start_primary(SINGLE_INSTANCE_ID, move || {
                         ctx.request_repaint();
-                    },
-                ));
+                    }));
             }
             app.tray_state = Some(tray_state);
             app._tray_guard = Some(tray_guard);
