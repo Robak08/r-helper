@@ -12,7 +12,7 @@ pub fn is_startup_enabled() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     hkcu.open_subkey(RUN_KEY)
         .and_then(|run| run.get_value::<String, _>(APP_REGISTRY_NAME))
-        .map(|path| path == current_exe_path())
+        .map(|path| path == current_exe_path() || path == startup_command())
         .unwrap_or(false)
 }
 
@@ -30,7 +30,7 @@ pub fn set_startup_enabled(enabled: bool) -> anyhow::Result<()> {
     let (run, _) = hkcu.create_subkey(RUN_KEY)?;
 
     if enabled {
-        run.set_value(APP_REGISTRY_NAME, &current_exe_path())?;
+        run.set_value(APP_REGISTRY_NAME, &startup_command())?;
     } else {
         let _ = run.delete_value(APP_REGISTRY_NAME);
     }
@@ -48,4 +48,9 @@ fn current_exe_path() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "rhelper.exe".to_string())
+}
+
+#[cfg(windows)]
+fn startup_command() -> String {
+    format!("\"{}\" --startup", current_exe_path())
 }

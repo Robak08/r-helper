@@ -9,6 +9,7 @@ pub fn render_footer(
     status_messages: &mut bool,
     minimize_to_tray: &mut bool,
     run_at_startup: &mut bool,
+    minimize_on_startup: &mut bool,
 ) {
     ui.add_space(6.0);
 
@@ -18,6 +19,12 @@ pub fn render_footer(
         ui.checkbox(minimize_to_tray, "Minimize to tray");
         ui.checkbox(run_at_startup, "Run at startup");
     });
+    if *run_at_startup {
+        ui.indent("startup_options", |ui| {
+            ui.checkbox(minimize_on_startup, "Minimize to tray on startup")
+                .on_hover_text("Start in the system tray when signing in to Windows.");
+        });
+    }
 
     ui.add_space(4.0);
 

@@ -149,6 +149,7 @@ struct RazerGuiApp {
     _tray_guard: Option<tray::TrayHandle>,
     minimize_to_tray: bool,
     run_at_startup: bool,
+    minimize_on_startup: bool,
     #[cfg(windows)]
     single_instance: Option<app_single_instance::PrimaryHandle>,
 
@@ -375,11 +376,11 @@ impl RazerGuiApp {
     }
 
     fn new(
+        app_config: config::AppConfig,
         repaint_wake: Arc<ui_wake::RepaintWake>,
         session_device_slot: DeviceSlot,
         session_state: Arc<SessionState>,
     ) -> Self {
-        let app_config = config::AppConfig::load();
         let ac_profile = app_config.ac_profile;
         let battery_profile = app_config.battery_profile;
         let auto_switch_enabled = app_config.auto_switch_enabled;
@@ -388,8 +389,9 @@ impl RazerGuiApp {
         let status_messages = app_config.debug_enabled;
         let minimize_to_tray = app_config.minimize_to_tray;
         let run_at_startup = app_config.run_at_startup;
+        let minimize_on_startup = app_config.minimize_on_startup;
         let cooling_pad_cfg = config::CoolingPadRuntime::from(&app_config.cooling_pad);
-        if startup::is_startup_enabled() != run_at_startup {
+        if run_at_startup || startup::is_startup_enabled() {
             if let Err(e) = startup::set_startup_enabled(run_at_startup) {
                 eprintln!("Failed to sync run-at-startup with registry: {}", e);
             }
@@ -440,6 +442,7 @@ impl RazerGuiApp {
             _tray_guard: None,
             minimize_to_tray,
             run_at_startup,
+            minimize_on_startup,
             #[cfg(windows)]
             single_instance: None,
 
@@ -1357,6 +1360,7 @@ impl RazerGuiApp {
             debug_enabled: self.status_messages,
             minimize_to_tray: self.minimize_to_tray,
             run_at_startup: self.run_at_startup,
+            minimize_on_startup: self.minimize_on_startup,
             cooling_pad: self.cooling_pad_runtime().into(),
         }
     }
@@ -2512,6 +2516,8 @@ impl eframe::App for RazerGuiApp {
         }
 
         if !self.is_window_visible() {
+            // eframe shows the window after its first frame; hide it again after rendering.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.poll_while_hidden(ctx);
             if self.should_quit {
                 self.shutdown();
@@ -2590,6 +2596,7 @@ impl eframe::App for RazerGuiApp {
         let prev_debug = self.status_messages;
         let prev_minimize = self.minimize_to_tray;
         let prev_startup = self.run_at_startup;
+        let prev_minimize_on_startup = self.minimize_on_startup;
         let footer_height = egui::TopBottomPanel::bottom("footer")
             .show(ctx, |ui| {
                 ui::footer::render_footer(
@@ -2597,6 +2604,7 @@ impl eframe::App for RazerGuiApp {
                     &mut self.status_messages,
                     &mut self.minimize_to_tray,
                     &mut self.run_at_startup,
+                    &mut self.minimize_on_startup,
                 );
             })
             .response
@@ -2614,7 +2622,10 @@ impl eframe::App for RazerGuiApp {
                 startup_registry_updated = true;
             }
         }
-        if self.status_messages != prev_debug || self.minimize_to_tray != prev_minimize {
+        if self.status_messages != prev_debug
+            || self.minimize_to_tray != prev_minimize
+            || self.minimize_on_startup != prev_minimize_on_startup
+        {
             footer_persist = true;
         }
         if footer_persist {
@@ -2622,6 +2633,7 @@ impl eframe::App for RazerGuiApp {
                 self.status_messages = prev_debug;
                 self.minimize_to_tray = prev_minimize;
                 self.run_at_startup = prev_startup;
+                self.minimize_on_startup = prev_minimize_on_startup;
                 if startup_registry_updated {
                     if let Err(rollback_error) = startup::set_startup_enabled(prev_startup) {
                         self.set_error_message(format!(
@@ -2815,6 +2827,10 @@ fn main() -> Result<(), eframe::Error> {
     }
 
     set_windows_app_id();
+    let app_config = config::AppConfig::load();
+    let start_in_tray = app_config.run_at_startup
+        && app_config.minimize_on_startup
+        && std::env::args_os().any(|arg| arg == "--startup");
     let initial_height = 610.0;
     let egui_icon = load_icon();
     let tray_icon = tray::icon_from_egui(egui_icon.clone());
@@ -2827,7 +2843,8 @@ fn main() -> Result<(), eframe::Error> {
             .with_title(APP_NAME)
             .with_icon(egui_icon)
             .with_always_on_top()
-            .with_active(true),
+            .with_active(!start_in_tray)
+            .with_visible(!start_in_tray),
         ..Default::default()
     };
 
@@ -2854,6 +2871,7 @@ fn main() -> Result<(), eframe::Error> {
             let repaint_wake =
                 ui_wake::RepaintWake::new(cc.egui_ctx.clone(), Arc::clone(&session_state));
             let mut app = RazerGuiApp::new(
+                app_config,
                 repaint_wake,
                 session_device_slot.clone(),
                 Arc::clone(&session_state),
@@ -2878,6 +2896,9 @@ fn main() -> Result<(), eframe::Error> {
             }
             app.tray_state = Some(tray_state);
             app._tray_guard = Some(tray_guard);
+            if start_in_tray {
+                app.hide_to_tray();
+            }
             app.base_window_height = initial_height as f32;
             Ok(Box::new(app))
         }),
