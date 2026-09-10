@@ -242,6 +242,8 @@ pub struct AppConfig {
     #[serde(default = "default_run_at_startup")]
     pub run_at_startup: bool,
     #[serde(default)]
+    pub minimize_on_startup: bool,
+    #[serde(default)]
     pub cooling_pad: CoolingPadConfig,
 }
 
@@ -274,6 +276,7 @@ impl Default for AppConfig {
             debug_enabled: false,
             minimize_to_tray: default_minimize_to_tray(),
             run_at_startup: default_run_at_startup(),
+            minimize_on_startup: false,
             cooling_pad: CoolingPadConfig::default(),
         }
     }
@@ -499,6 +502,7 @@ mod tests {
             debug_enabled: true,
             minimize_to_tray: false,
             run_at_startup: false,
+            minimize_on_startup: true,
             cooling_pad,
         };
 
@@ -507,6 +511,14 @@ mod tests {
 
         assert!(!migrated);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn old_config_defaults_to_visible_startup() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("minimize_on_startup");
+        let loaded: AppConfig = serde_json::from_value(raw).unwrap();
+        assert!(!loaded.minimize_on_startup);
     }
 
     #[test]
