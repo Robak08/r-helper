@@ -59,14 +59,6 @@ impl CoolingPadController {
         }
     }
 
-    pub fn runtime(&self) -> &CoolingPadRuntime {
-        &self.runtime
-    }
-
-    pub fn runtime_mut(&mut self) -> &mut CoolingPadRuntime {
-        &mut self.runtime
-    }
-
     pub fn set_runtime(&mut self, runtime: CoolingPadRuntime) {
         self.runtime = normalize_runtime(runtime);
     }

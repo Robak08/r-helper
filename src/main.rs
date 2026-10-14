@@ -942,6 +942,9 @@ impl RazerGuiApp {
         if !self.fully_initialized || self.loading || !self.activity_gate.is_active() {
             return;
         }
+        if !self.cooling_pad_controller.has_pending_apply() {
+            return;
+        }
         self.sync_cooling_pad_controller_from_ui();
         let mut reset_auto = false;
         let (outcomes, _) = self.cooling_pad_controller.apply_pending(
