@@ -4,7 +4,8 @@ use crate::system::thermal::ThermalSnapshot;
 
 pub const LAPTOP_FAN_CAP_HYSTERESIS: u16 = 100;
 pub const LAPTOP_FAN_CAP_RELEASE_TEMP_C: f32 = 65.0;
-pub const LAPTOP_FAN_CAP_COOL_DWELL_SECS: f32 = 3.0;
+pub const LAPTOP_FAN_CAP_ENGAGE_DWELL_SECS: f32 = 1.5;
+pub const LAPTOP_FAN_CAP_PROBE_INTERVAL_SECS: f32 = 5.0;
 
 /// Laptop auto-max RPM cap enforced on a dedicated thread (works while gaming / in tray).
 #[derive(Debug, Default)]
@@ -25,7 +26,18 @@ pub(crate) struct LaptopFanState {
 
 #[derive(Debug, Default)]
 pub(crate) struct CapEnforcerState {
-    cool_temp_dwell_secs: f32,
+    /// Auto actual >= max, accumulating before first engage.
+    engage_dwell_secs: f32,
+    /// Time since cap engaged (for periodic Auto probe).
+    capped_secs: f32,
+    /// After releasing to Auto, wait one sample to recap or drop the cap.
+    probe_pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeDecision {
+    StayAuto,
+    Recap,
 }
 
 impl LaptopFanState {
@@ -47,42 +59,86 @@ fn peak_temp_c(thermal: &ThermalSnapshot) -> Option<f32> {
     }
 }
 
-fn should_release_cap(
-    max: u16,
-    actual: u16,
-    thermal: &ThermalSnapshot,
-    state: &mut CapEnforcerState,
-    dt_secs: f32,
-) -> bool {
-    if actual <= max {
-        return true;
-    }
-
-    if actual < max.saturating_sub(LAPTOP_FAN_CAP_HYSTERESIS) {
-        return true;
-    }
-
-    if let Some(peak) = peak_temp_c(thermal) {
-        if peak < LAPTOP_FAN_CAP_RELEASE_TEMP_C {
-            state.cool_temp_dwell_secs += dt_secs;
-            if state.cool_temp_dwell_secs >= LAPTOP_FAN_CAP_COOL_DWELL_SECS {
-                return true;
-            }
-        } else {
-            state.cool_temp_dwell_secs = 0.0;
-        }
-    }
-
-    false
+fn reset_cap_timers(state: &mut CapEnforcerState) {
+    state.engage_dwell_secs = 0.0;
+    state.capped_secs = 0.0;
+    state.probe_pending = false;
 }
 
-fn try_release_to_auto(device: &Device, cap: &mut LaptopFanCapShared) -> bool {
+/// Returns true when peak is cool enough to probe/release immediately (no 3s dwell while capped).
+pub(crate) fn peak_cool_immediate_release(thermal: &ThermalSnapshot) -> bool {
+    peak_temp_c(thermal).is_some_and(|peak| peak < LAPTOP_FAN_CAP_RELEASE_TEMP_C)
+}
+
+/// Accumulate engage dwell; returns true when the cap should engage.
+pub(crate) fn tick_engage_dwell(
+    state: &mut CapEnforcerState,
+    actual: u16,
+    max: u16,
+    dt_secs: f32,
+) -> bool {
+    if actual < max {
+        state.engage_dwell_secs = 0.0;
+        return false;
+    }
+    state.engage_dwell_secs += dt_secs;
+    state.engage_dwell_secs >= LAPTOP_FAN_CAP_ENGAGE_DWELL_SECS
+}
+
+/// After an Auto probe sample, decide whether to recap or leave Auto.
+pub(crate) fn probe_decision(actual: u16, max: u16) -> ProbeDecision {
+    if actual >= max {
+        ProbeDecision::Recap
+    } else if actual.saturating_add(LAPTOP_FAN_CAP_HYSTERESIS) < max {
+        ProbeDecision::StayAuto
+    } else {
+        // In the hysteresis band below max — treat as safe to stay on Auto.
+        ProbeDecision::StayAuto
+    }
+}
+
+/// Whether to release Manual and probe Auto while capped.
+pub(crate) fn should_probe_auto(
+    state: &CapEnforcerState,
+    thermal: &ThermalSnapshot,
+    _dt_secs: f32,
+) -> bool {
+    if state.probe_pending {
+        return false;
+    }
+    if peak_cool_immediate_release(thermal) {
+        return true;
+    }
+    state.capped_secs >= LAPTOP_FAN_CAP_PROBE_INTERVAL_SECS
+}
+
+fn try_release_to_auto(device: &Device) -> bool {
     if command::set_fan_mode(device, FanMode::Auto).is_ok() {
-        cap.cap_active = false;
         true
     } else {
-        eprintln!("laptop fan cap: failed to restore Auto mode");
+        eprintln!("laptop fan cap: failed to restore Auto mode for probe");
         false
+    }
+}
+
+fn engage_cap(device: &Device, cap: &mut LaptopFanCapShared, state: &mut CapEnforcerState) -> bool {
+    if command::set_fan_mode(device, FanMode::Manual).is_ok()
+        && command::set_fan_rpm(device, cap.max_rpm, true).is_ok()
+    {
+        cap.cap_active = true;
+        state.engage_dwell_secs = 0.0;
+        state.capped_secs = 0.0;
+        state.probe_pending = false;
+        true
+    } else {
+        false
+    }
+}
+
+fn start_auto_probe(device: &Device, state: &mut CapEnforcerState) {
+    if try_release_to_auto(device) {
+        state.probe_pending = true;
+        state.capped_secs = 0.0;
     }
 }
 
@@ -101,65 +157,89 @@ fn enforce_laptop_fan_cap(
 
     if !cap.limit_enabled {
         cap.cap_active = false;
-        state.cool_temp_dwell_secs = 0.0;
+        reset_cap_timers(state);
         return;
     }
 
     let max = cap.max_rpm;
 
+    // User took over Manual at a different RPM — drop our cap state.
     if fan.fan_mode == FanMode::Manual {
-        if cap.cap_active && fan.fan_set_rpm == Some(max) {
-            if let Err(e) = command::set_fan_rpm(device, max, true) {
-                eprintln!("laptop fan cap: failed to maintain max RPM: {e}");
+        if cap.cap_active && fan.fan_set_rpm != Some(max) {
+            cap.cap_active = false;
+            reset_cap_timers(state);
+        }
+        return;
+    }
+
+    if state.probe_pending {
+        if fan.fan_mode != FanMode::Auto {
+            return;
+        }
+        let Some(actual) = fan.fan_actual_rpm else {
+            return;
+        };
+        match probe_decision(actual, max) {
+            ProbeDecision::Recap => {
+                if engage_cap(device, cap, state) {
+                    state.probe_pending = false;
+                }
             }
-            if let Some(actual) = fan.fan_actual_rpm {
-                if should_release_cap(max, actual, thermal, state, dt_secs) {
-                    let _ = try_release_to_auto(device, cap);
+            ProbeDecision::StayAuto => {
+                cap.cap_active = false;
+                state.probe_pending = false;
+                reset_cap_timers(state);
+            }
+        }
+        return;
+    }
+
+    if cap.cap_active {
+        state.capped_secs += dt_secs;
+
+        if fan.fan_mode == FanMode::Auto {
+            // Cap flag set but hardware already Auto — decide from this sample.
+            let Some(actual) = fan.fan_actual_rpm else {
+                return;
+            };
+            match probe_decision(actual, max) {
+                ProbeDecision::Recap => {
+                    let _ = engage_cap(device, cap, state);
+                }
+                ProbeDecision::StayAuto => {
+                    cap.cap_active = false;
+                    reset_cap_timers(state);
                 }
             }
             return;
         }
-        if cap.cap_active && fan.fan_set_rpm != Some(max) {
-            cap.cap_active = false;
-            state.cool_temp_dwell_secs = 0.0;
+
+        // Capped on Manual@max: probe periodically instead of rewriting RPM every poll.
+        if should_probe_auto(state, thermal, dt_secs) {
+            start_auto_probe(device, state);
+            return;
         }
+
+        // Only correct hardware if it left Manual@max while still capped and still hot.
+        let needs_reclip = fan.fan_set_rpm != Some(max)
+            || fan.fan_actual_rpm.is_some_and(|actual| actual > max.saturating_add(LAPTOP_FAN_CAP_HYSTERESIS));
+        if needs_reclip {
+            let _ = engage_cap(device, cap, state);
+        }
+        return;
+    }
+
+    if fan.fan_mode != FanMode::Auto {
+        state.engage_dwell_secs = 0.0;
         return;
     }
 
     let Some(actual) = fan.fan_actual_rpm else {
-        if cap.cap_active {
-            let _ = command::set_fan_rpm(device, max, true);
-        }
         return;
     };
 
-    if cap.cap_active {
-        if fan.fan_mode != FanMode::Manual {
-            if let Err(e) = command::set_fan_mode(device, FanMode::Manual) {
-                eprintln!("laptop fan cap: failed to set Manual mode: {e}");
-            }
-        }
-        if let Err(e) = command::set_fan_rpm(device, max, true) {
-            eprintln!("laptop fan cap: failed to set max RPM: {e}");
-        }
-
-        if should_release_cap(max, actual, thermal, state, dt_secs) {
-            let _ = try_release_to_auto(device, cap);
-        }
-        return;
-    }
-
-    state.cool_temp_dwell_secs = 0.0;
-
-    if fan.fan_mode != FanMode::Auto {
-        return;
-    }
-
-    if actual >= max
-        && command::set_fan_mode(device, FanMode::Manual).is_ok()
-        && command::set_fan_rpm(device, max, true).is_ok()
-    {
-        cap.cap_active = true;
+    if tick_engage_dwell(state, actual, max, dt_secs) {
+        let _ = engage_cap(device, cap, state);
     }
 }
 
@@ -179,26 +259,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn releases_when_actual_at_or_below_max() {
-        let thermal = ThermalSnapshot { cpu_avg_c: Some(57.0), gpu_avg_c: Some(55.0) };
+    fn single_sample_at_max_does_not_engage() {
         let mut state = CapEnforcerState::default();
-        assert!(should_release_cap(4000, 4000, &thermal, &mut state, 0.8));
-        assert!(should_release_cap(4000, 3900, &thermal, &mut state, 0.8));
+        assert!(!tick_engage_dwell(&mut state, 3200, 3200, 0.8));
+        assert!(state.engage_dwell_secs > 0.0);
     }
 
     #[test]
-    fn releases_after_cool_temp_dwell() {
-        let thermal = ThermalSnapshot { cpu_avg_c: Some(57.0), gpu_avg_c: None };
+    fn dwell_then_engage() {
         let mut state = CapEnforcerState::default();
-        assert!(!should_release_cap(4000, 4100, &thermal, &mut state, 1.0));
-        assert!(!should_release_cap(4000, 4100, &thermal, &mut state, 1.0));
-        assert!(should_release_cap(4000, 4100, &thermal, &mut state, 1.5));
+        assert!(!tick_engage_dwell(&mut state, 3300, 3200, 0.5));
+        assert!(!tick_engage_dwell(&mut state, 3300, 3200, 0.5));
+        assert!(tick_engage_dwell(&mut state, 3300, 3200, 0.5));
     }
 
     #[test]
-    fn no_release_when_hot_and_above_max() {
-        let thermal = ThermalSnapshot { cpu_avg_c: Some(85.0), gpu_avg_c: Some(80.0) };
+    fn engage_dwell_resets_when_auto_drops_below_max() {
         let mut state = CapEnforcerState::default();
-        assert!(!should_release_cap(4000, 4100, &thermal, &mut state, 5.0));
+        tick_engage_dwell(&mut state, 3300, 3200, 1.0);
+        assert!(!tick_engage_dwell(&mut state, 3000, 3200, 0.1));
+        assert_eq!(state.engage_dwell_secs, 0.0);
+    }
+
+    #[test]
+    fn probe_stays_auto_when_below_max_with_hysteresis() {
+        assert_eq!(probe_decision(3000, 3200), ProbeDecision::StayAuto);
+        assert_eq!(probe_decision(3099, 3200), ProbeDecision::StayAuto);
+    }
+
+    #[test]
+    fn probe_recaps_when_at_or_above_max() {
+        assert_eq!(probe_decision(3200, 3200), ProbeDecision::Recap);
+        assert_eq!(probe_decision(3300, 3200), ProbeDecision::Recap);
+    }
+
+    #[test]
+    fn should_probe_after_interval() {
+        let state = CapEnforcerState { capped_secs: 5.0, ..Default::default() };
+        let hot = ThermalSnapshot { cpu_avg_c: Some(76.0), gpu_avg_c: Some(60.0) };
+        assert!(should_probe_auto(&state, &hot, 0.8));
+    }
+
+    #[test]
+    fn should_probe_immediately_when_cool() {
+        let state = CapEnforcerState { capped_secs: 0.5, ..Default::default() };
+        let cool = ThermalSnapshot { cpu_avg_c: Some(57.0), gpu_avg_c: None };
+        assert!(peak_cool_immediate_release(&cool));
+        assert!(should_probe_auto(&state, &cool, 0.8));
+    }
+
+    #[test]
+    fn should_not_probe_when_pending() {
+        let state = CapEnforcerState { probe_pending: true, capped_secs: 10.0, ..Default::default() };
+        let cool = ThermalSnapshot { cpu_avg_c: Some(50.0), gpu_avg_c: None };
+        assert!(!should_probe_auto(&state, &cool, 0.8));
     }
 }

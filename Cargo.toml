@@ -1,6 +1,6 @@
 [package]
 name = "r-helper"
-version = "0.8.8"
+version = "0.8.9"
 edition = "2024"
 description = "R-Helper - Razer Blade control interface"
 authors = ["Fatalution"]
