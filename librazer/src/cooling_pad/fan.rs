@@ -1,4 +1,4 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 pub const REPORT_LEN: usize = 91;
 pub const MIN_RPM: u16 = 500;
@@ -27,7 +27,13 @@ const HEADER_TEMPLATE: [u8; 90] = {
     h
 };
 
-fn build_buffer(report_code: u8, sub_ver: u8, curve_id: u8, rpm: u16, chk_l: u8) -> [u8; REPORT_LEN] {
+fn build_buffer(
+    report_code: u8,
+    sub_ver: u8,
+    curve_id: u8,
+    rpm: u16,
+    chk_l: u8,
+) -> [u8; REPORT_LEN] {
     let mut buf = [0u8; REPORT_LEN];
     buf[0] = REPORT_ID;
     buf[1..].copy_from_slice(&HEADER_TEMPLATE);
@@ -82,16 +88,13 @@ fn parse_rpm_from_buffer(buf: &[u8; REPORT_LEN]) -> Option<u16> {
 }
 
 fn send_feature(device: &hidapi::HidDevice, buf: &[u8; REPORT_LEN]) -> Result<()> {
-    device
-        .send_feature_report(buf)
-        .context("Failed to send cooling pad fan feature report")?;
+    device.send_feature_report(buf).context("Failed to send cooling pad fan feature report")?;
     Ok(())
 }
 
 fn get_feature(device: &hidapi::HidDevice, buf: &mut [u8; REPORT_LEN]) -> Result<()> {
-    let size = device
-        .get_feature_report(buf)
-        .context("Failed to read cooling pad fan feature report")?;
+    let size =
+        device.get_feature_report(buf).context("Failed to read cooling pad fan feature report")?;
     ensure!(size >= REPORT_LEN, "Cooling pad fan response too short: {size}");
     Ok(())
 }

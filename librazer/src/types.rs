@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use strum_macros::{EnumIter, EnumString};
@@ -68,9 +68,7 @@ pub enum LightsAlwaysOn {
     Disable = 0x00,
 }
 
-#[derive(
-    EnumIter, ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize,
-)]
+#[derive(EnumIter, ValueEnum, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BatteryCare {
     Percent50 = 0xB2,
     Percent55 = 0xB7,

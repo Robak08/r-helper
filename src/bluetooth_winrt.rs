@@ -94,6 +94,8 @@ fn is_headphone_class(major: i32, minor: i32) -> bool {
     major == 4 && matches!(minor, 0 | 1 | 2 | 6 | 7 | 10 | 18)
 }
 
-fn wait_async<T: windows::core::RuntimeType>(operation: IAsyncOperation<T>) -> windows::core::Result<T> {
+fn wait_async<T: windows::core::RuntimeType>(
+    operation: IAsyncOperation<T>,
+) -> windows::core::Result<T> {
     operation.join().map_err(|error| windows::core::Error::from(error))
 }

@@ -4,7 +4,12 @@ pub const REPORT_LEN: usize = 90;
 const STATUS_NEW: u8 = 0x00;
 const STATUS_OK: u8 = 0x02;
 
-pub fn build_request(transaction_id: u8, command_class: u8, command_id: u8, args: &[u8]) -> [u8; REPORT_LEN] {
+pub fn build_request(
+    transaction_id: u8,
+    command_class: u8,
+    command_id: u8,
+    args: &[u8],
+) -> [u8; REPORT_LEN] {
     let mut report = [0u8; REPORT_LEN];
     report[0] = STATUS_NEW;
     report[1] = transaction_id;

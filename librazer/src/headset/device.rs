@@ -1,4 +1,4 @@
-use super::pids::{headset_profile, HeadsetProfile};
+use super::pids::{HeadsetProfile, headset_profile};
 use super::protocol::{arm_device, probe_battery_once, query_battery, send_rf_wake};
 use super::transport::drain_input;
 
@@ -115,9 +115,7 @@ impl HeadsetSession {
 
 /// Best-effort one-shot headset battery read (opens and closes the handle).
 pub fn probe_headset_battery(entry: &RazerHidEntry) -> Option<PeripheralBattery> {
-    HeadsetSession::open(entry)
-        .ok()
-        .and_then(|session| session.battery())
+    HeadsetSession::open(entry).ok().and_then(|session| session.battery())
 }
 
 /// Maintains persistent headset sessions for keepalive and periodic battery polling.
@@ -127,9 +125,7 @@ pub struct HeadsetBatteryManager {
 
 impl HeadsetBatteryManager {
     pub fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-        }
+        Self { sessions: HashMap::new() }
     }
 
     /// Reconcile connected headsets and advance active sessions.
@@ -139,8 +135,7 @@ impl HeadsetBatteryManager {
         let connected_pids: std::collections::HashSet<u16> =
             headset_entries.iter().map(|(pid, _)| *pid).collect();
 
-        self.sessions
-            .retain(|pid, _| connected_pids.contains(pid));
+        self.sessions.retain(|pid, _| connected_pids.contains(pid));
 
         for (pid, entry) in &headset_entries {
             if self.sessions.contains_key(pid) {
@@ -212,10 +207,8 @@ pub fn ranked_entries_for_pid<'a>(
     entries: &'a [RazerHidEntry],
     pid: u16,
 ) -> Vec<&'a RazerHidEntry> {
-    let mut candidates: Vec<&RazerHidEntry> = entries
-        .iter()
-        .filter(|e| e.pid == pid && e.usage_page != 0x0C)
-        .collect();
+    let mut candidates: Vec<&RazerHidEntry> =
+        entries.iter().filter(|e| e.pid == pid && e.usage_page != 0x0C).collect();
 
     candidates.sort_by_key(|e| interface_priority(e));
     candidates
@@ -263,10 +256,7 @@ mod tests {
 
     #[test]
     fn ranked_entries_skips_consumer_audio() {
-        let entries = vec![
-            entry(0x057a, 0x0C, "/audio"),
-            entry(0x057a, 0xFF14, "/vendor"),
-        ];
+        let entries = vec![entry(0x057a, 0x0C, "/audio"), entry(0x057a, 0xFF14, "/vendor")];
 
         let ranked = ranked_entries_for_pid(&entries, 0x057a);
         assert_eq!(ranked.len(), 1);
@@ -278,7 +268,9 @@ mod tests {
     #[test]
     #[ignore = "requires a supported Razer headset connected via USB"]
     fn live_probe_connected_headsets() {
-        use crate::enumerate::{enrich_peripheral_batteries, list_razer_hid_devices, summarize_peripheral_devices};
+        use crate::enumerate::{
+            enrich_peripheral_batteries, list_razer_hid_devices, summarize_peripheral_devices,
+        };
 
         let entries = list_razer_hid_devices().expect("hid enumeration");
         let mut summaries = summarize_peripheral_devices(&entries);
@@ -291,7 +283,11 @@ mod tests {
             }
             println!(
                 "{} (PID 0x{:04x}): battery={:?} charging={:?} available={}",
-                device.name, device.pid, device.battery_percent, device.battery_charging, device.battery_available
+                device.name,
+                device.pid,
+                device.battery_percent,
+                device.battery_charging,
+                device.battery_available
             );
             assert!(
                 device.battery_available,

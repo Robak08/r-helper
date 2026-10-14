@@ -12,12 +12,8 @@ pub enum BladeGeneration {
 
 const MODERN6_INIT_CMDS: &[u16] = &[0x0081, 0x0086, 0x0f90, 0x0086, 0x0f10, 0x0087];
 
-const LEGACY4_PERF_MODES: &[PerfMode] = &[
-    PerfMode::Battery,
-    PerfMode::Silent,
-    PerfMode::Balanced,
-    PerfMode::Custom,
-];
+const LEGACY4_PERF_MODES: &[PerfMode] =
+    &[PerfMode::Battery, PerfMode::Silent, PerfMode::Balanced, PerfMode::Custom];
 
 const MODERN6_PERF_MODES: &[PerfMode] = &[
     PerfMode::Battery,
@@ -134,11 +130,8 @@ pub const KNOWN_PROFILES: &[PidProfile] = &[
     },
 ];
 
-pub const GENERIC_FALLBACK: PidProfile = PidProfile {
-    pid: 0,
-    generation: BladeGeneration::Discovery,
-    marketing_name: "Razer Blade",
-};
+pub const GENERIC_FALLBACK: PidProfile =
+    PidProfile { pid: 0, generation: BladeGeneration::Discovery, marketing_name: "Razer Blade" };
 
 pub fn lookup_marketing_name(pid: u16) -> Option<&'static str> {
     lookup_profile(pid).map(|p| p.marketing_name)
@@ -158,11 +151,7 @@ pub fn resolve_generation(pid: u16, model_sku: &str) -> BladeGeneration {
         return profile.generation;
     }
     let from_sku = infer_generation_from_sku(model_sku);
-    if from_sku != BladeGeneration::Discovery {
-        from_sku
-    } else {
-        GENERIC_FALLBACK.generation
-    }
+    if from_sku != BladeGeneration::Discovery { from_sku } else { GENERIC_FALLBACK.generation }
 }
 
 /// Infer generation from SystemSKU when PID is unknown (first 10 chars per Razer support doc).

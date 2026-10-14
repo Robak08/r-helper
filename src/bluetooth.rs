@@ -632,7 +632,8 @@ fn pnp_names_relate(left: &str, right: &str) -> bool {
 }
 
 fn pnp_battery_storage_key(name: &str) -> String {
-    let canonical = canonical_bluetooth_audio_display_name(name).unwrap_or_else(|| name.to_string());
+    let canonical =
+        canonical_bluetooth_audio_display_name(name).unwrap_or_else(|| name.to_string());
     normalized_device_name(&canonical)
 }
 
@@ -661,10 +662,7 @@ fn register_connected_transport_headset(
     }
     connected_keys.insert(key.clone());
     bt_connected_keys.insert(key);
-    merge_headset(
-        headsets,
-        BluetoothHeadsetSummary { name: canonical, battery_percent: None },
-    );
+    merge_headset(headsets, BluetoothHeadsetSummary { name: canonical, battery_percent: None });
 }
 
 pub(crate) fn canonical_bluetooth_audio_display_name(name: &str) -> Option<String> {
@@ -674,13 +672,8 @@ pub(crate) fn canonical_bluetooth_audio_display_name(name: &str) -> Option<Strin
     }
 
     let mut owned = display.to_string();
-    const SUFFIXES: &[&str] = &[
-        " Hands-Free AG",
-        " Hands-Free",
-        " Hands Free AG",
-        " Hands Free",
-        " AVRCP",
-    ];
+    const SUFFIXES: &[&str] =
+        &[" Hands-Free AG", " Hands-Free", " Hands Free AG", " Hands Free", " AVRCP"];
     for suffix in SUFFIXES {
         if let Some(stripped) = owned.strip_suffix(suffix) {
             owned = stripped.trim_end().to_string();
@@ -705,7 +698,10 @@ pub(crate) fn canonical_bluetooth_audio_display_name(name: &str) -> Option<Strin
     Some(owned)
 }
 
-pub(crate) fn merge_headset(headsets: &mut Vec<BluetoothHeadsetSummary>, incoming: BluetoothHeadsetSummary) {
+pub(crate) fn merge_headset(
+    headsets: &mut Vec<BluetoothHeadsetSummary>,
+    incoming: BluetoothHeadsetSummary,
+) {
     let incoming_key = normalized_device_name(&incoming.name);
     if let Some(existing) =
         headsets.iter_mut().find(|headset| normalized_device_name(&headset.name) == incoming_key)

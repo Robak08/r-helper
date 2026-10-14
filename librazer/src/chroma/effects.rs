@@ -1,4 +1,4 @@
-use crate::chroma::packet::{build_request, xor_crc, REPORT_LEN};
+use crate::chroma::packet::{REPORT_LEN, build_request, xor_crc};
 
 pub const VARSTORE: u8 = 0x01;
 pub const ZERO_LED: u8 = 0x00;
@@ -33,7 +33,11 @@ fn extended_matrix_effect_base(
     finalize(report)
 }
 
-pub fn build_extended_none(transaction_id: u8, variable_storage: u8, led_id: u8) -> [u8; REPORT_LEN] {
+pub fn build_extended_none(
+    transaction_id: u8,
+    variable_storage: u8,
+    led_id: u8,
+) -> [u8; REPORT_LEN] {
     extended_matrix_effect_base(transaction_id, 0x06, variable_storage, led_id, 0x00)
 }
 
@@ -43,7 +47,8 @@ pub fn build_extended_static(
     led_id: u8,
     rgb: Rgb,
 ) -> [u8; REPORT_LEN] {
-    let mut report = extended_matrix_effect_base(transaction_id, 0x09, variable_storage, led_id, 0x01);
+    let mut report =
+        extended_matrix_effect_base(transaction_id, 0x09, variable_storage, led_id, 0x01);
     report[8 + 5] = 0x01;
     report[8 + 6] = rgb.r;
     report[8 + 7] = rgb.g;
@@ -57,7 +62,8 @@ pub fn build_extended_breathing_single(
     led_id: u8,
     rgb: Rgb,
 ) -> [u8; REPORT_LEN] {
-    let mut report = extended_matrix_effect_base(transaction_id, 0x09, variable_storage, led_id, 0x02);
+    let mut report =
+        extended_matrix_effect_base(transaction_id, 0x09, variable_storage, led_id, 0x02);
     report[8 + 3] = 0x01;
     report[8 + 5] = 0x01;
     report[8 + 6] = rgb.r;
@@ -76,7 +82,11 @@ pub fn build_extended_brightness(
     finalize(build_request(transaction_id, 0x0F, 0x04, &args))
 }
 
-pub fn build_extended_get_brightness(transaction_id: u8, variable_storage: u8, led_id: u8) -> [u8; REPORT_LEN] {
+pub fn build_extended_get_brightness(
+    transaction_id: u8,
+    variable_storage: u8,
+    led_id: u8,
+) -> [u8; REPORT_LEN] {
     let args = [variable_storage, led_id];
     finalize(build_request(transaction_id, 0x0F, 0x84, &args))
 }

@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use crate::session_lock::SessionState;
+use crate::activity_gate::ActivityGate;
 
 const WAKE_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -14,7 +14,7 @@ const WAKE_INTERVAL: Duration = Duration::from_secs(2);
 /// this keeps `update()` running so polled state (temps, fan RPM, etc.) reaches the UI.
 pub struct RepaintWake {
     ctx: eframe::egui::Context,
-    session: Arc<SessionState>,
+    activity_gate: Arc<ActivityGate>,
     desired: AtomicBool,
     running: AtomicBool,
     stopped: AtomicBool,
@@ -22,10 +22,10 @@ pub struct RepaintWake {
 }
 
 impl RepaintWake {
-    pub fn new(ctx: eframe::egui::Context, session: Arc<SessionState>) -> Arc<Self> {
+    pub fn new(ctx: eframe::egui::Context, activity_gate: Arc<ActivityGate>) -> Arc<Self> {
         Arc::new(Self {
             ctx,
-            session,
+            activity_gate,
             desired: AtomicBool::new(false),
             running: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
@@ -62,7 +62,7 @@ impl RepaintWake {
                     while wake.desired.load(Ordering::Acquire)
                         && !wake.stopped.load(Ordering::Acquire)
                     {
-                        if !wake.session.locked.load(Ordering::Relaxed) {
+                        if wake.activity_gate.is_active() {
                             wake.ctx.request_repaint();
                         }
                         std::thread::sleep(WAKE_INTERVAL);

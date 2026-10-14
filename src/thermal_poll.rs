@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::activity_gate::ActivityGate;
 use crate::system::thermal::{
     CpuTempSource, ThermalReader, ThermalSnapshot, ThermalSpikeFilterState,
     filter_thermal_raw_snapshot,
@@ -16,6 +17,7 @@ const SLOW_POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub fn spawn_thermal_poller(
     poll_slow: Arc<AtomicBool>,
     shared: Arc<Mutex<ThermalSnapshot>>,
+    activity_gate: Arc<ActivityGate>,
     stop: Arc<StopSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -31,8 +33,11 @@ pub fn spawn_thermal_poller(
                 } else {
                     FAST_POLL_INTERVAL
                 };
-                if stop.wait(interval) {
+                if stop.wait_active(&activity_gate, interval) {
                     break;
+                }
+                if !activity_gate.is_active() {
+                    continue;
                 }
 
                 #[cfg(target_os = "windows")]

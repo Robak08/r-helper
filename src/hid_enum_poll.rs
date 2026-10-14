@@ -11,6 +11,7 @@ use librazer::{
     headset::HeadsetBatteryManager,
 };
 
+use crate::activity_gate::ActivityGate;
 use crate::worker::StopSignal;
 
 const COOLING_PAD_CHECK_INTERVAL: Duration = Duration::from_secs(2);
@@ -24,6 +25,7 @@ pub enum HidEnumMessage {
 
 pub fn spawn_hid_enum_poller(
     tx: SyncSender<HidEnumMessage>,
+    activity_gate: Arc<ActivityGate>,
     stop: Arc<StopSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -35,7 +37,10 @@ pub fn spawn_hid_enum_poller(
             let mut last_pad_present = None;
             let mut headset_manager = HeadsetBatteryManager::new();
 
-            while !stop.wait(COOLING_PAD_CHECK_INTERVAL) {
+            while !stop.wait_active(&activity_gate, COOLING_PAD_CHECK_INTERVAL) {
+                if !activity_gate.is_active() {
+                    continue;
+                }
                 let Ok(entries) = list_razer_hid_devices() else {
                     continue;
                 };

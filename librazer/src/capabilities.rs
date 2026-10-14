@@ -52,14 +52,10 @@ pub fn resolve_descriptor(
     generation: BladeGeneration,
     probed_features: Vec<&'static str>,
 ) -> Descriptor {
-    let features: Vec<&'static str> = probed_features
-        .into_iter()
-        .filter(|f| is_known_feature(f))
-        .collect();
+    let features: Vec<&'static str> =
+        probed_features.into_iter().filter(|f| is_known_feature(f)).collect();
 
-    let perf_modes = generation
-        .default_perf_modes()
-        .map(|modes| modes.to_vec());
+    let perf_modes = generation.default_perf_modes().map(|modes| modes.to_vec());
 
     let cpu_boosts = generation.cpu_boosts().map(|b| b.to_vec());
     let gpu_boosts = generation.gpu_boosts().map(|b| b.to_vec());

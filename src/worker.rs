@@ -4,6 +4,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::activity_gate::ActivityGate;
+
 /// Cooperative, interruptible stop signal for background workers.
 #[derive(Debug, Default)]
 pub struct StopSignal {
@@ -38,6 +40,11 @@ impl StopSignal {
             .wait_timeout_while(guard, duration, |_| !self.is_stopped())
             .unwrap_or_else(|error| error.into_inner());
         self.is_stopped()
+    }
+
+    /// Wait for `duration` while activity is allowed; returns `true` when stop was requested.
+    pub fn wait_active(&self, gate: &ActivityGate, duration: Duration) -> bool {
+        gate.wait_for_active_or_stop(self, duration)
     }
 }
 

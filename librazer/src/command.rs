@@ -5,7 +5,7 @@ use crate::types::{
     MaxFanSpeedMode, PerfMode,
 };
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 
 fn _send_command(device: &Device, command: u16, args: &[u8]) -> Result<Packet> {
     let response = device.send(Packet::new(command, args))?;

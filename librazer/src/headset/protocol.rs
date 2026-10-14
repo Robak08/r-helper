@@ -1,5 +1,5 @@
 use super::packet::{
-    build_report, CMD_CLASS_BATTERY, CMD_CLASS_CHARGING, CMD_CLASS_INIT, RF_WAKE_REPORT,
+    CMD_CLASS_BATTERY, CMD_CLASS_CHARGING, CMD_CLASS_INIT, RF_WAKE_REPORT, build_report,
 };
 use super::pids::HeadsetProfile;
 use super::transport::{write_and_read, write_report};
@@ -44,7 +44,10 @@ fn send_rf_wake_burst(device: &hidapi::HidDevice) -> Result<()> {
 }
 
 /// Query battery level and charging state from an armed headset session.
-pub fn query_battery(device: &hidapi::HidDevice, profile: HeadsetProfile) -> Result<Option<PeripheralBattery>> {
+pub fn query_battery(
+    device: &hidapi::HidDevice,
+    profile: HeadsetProfile,
+) -> Result<Option<PeripheralBattery>> {
     if profile == HeadsetProfile::WirelessDongle {
         send_rf_wake(device)?;
     }
@@ -63,16 +66,10 @@ pub fn query_battery(device: &hidapi::HidDevice, profile: HeadsetProfile) -> Res
     }
 
     let charging_resp = write_and_read(device, &build_report(true, CMD_CLASS_CHARGING))?;
-    let charging = charging_resp
-        .as_deref()
-        .and_then(parse_value_byte)
-        .map(|v| v != 0)
-        .unwrap_or(false);
+    let charging =
+        charging_resp.as_deref().and_then(parse_value_byte).map(|v| v != 0).unwrap_or(false);
 
-    Ok(Some(PeripheralBattery {
-        percent: percent.min(100),
-        charging,
-    }))
+    Ok(Some(PeripheralBattery { percent: percent.min(100), charging }))
 }
 
 /// Best-effort one-shot probe: try a direct query, then fall back to full arming.

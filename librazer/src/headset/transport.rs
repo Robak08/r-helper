@@ -1,6 +1,6 @@
 use super::packet::REPORT_LEN;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::{thread, time::Duration};
 
 const READ_TIMEOUT_MS: i32 = 200;
@@ -11,10 +11,7 @@ pub fn write_report(device: &hidapi::HidDevice, report: &[u8]) -> Result<()> {
         .write(report)
         .with_context(|| format!("Failed to write {}-byte HID report", report.len()))?;
     if written != report.len() {
-        return Err(anyhow!(
-            "Short HID write: expected {} bytes, wrote {written}",
-            report.len()
-        ));
+        return Err(anyhow!("Short HID write: expected {} bytes, wrote {written}", report.len()));
     }
     thread::sleep(POST_WRITE_DELAY);
     Ok(())

@@ -1,4 +1,4 @@
-use const_format::{map_ascii_case, Case};
+use const_format::{Case, map_ascii_case};
 
 pub trait Feature {
     fn name(&self) -> &'static str;

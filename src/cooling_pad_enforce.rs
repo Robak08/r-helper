@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::activity_gate::ActivityGate;
 use crate::cooling_pad_auto::{
     CoolingPadAutoInputs, CoolingPadAutoOutput, CoolingPadAutoState, compute_combined_auto,
 };
@@ -67,19 +68,20 @@ pub struct CoolingPadEnforceContext {
     pub settings: Arc<Mutex<CoolingPadEnforceShared>>,
     pub laptop_fan_rpm: Arc<Mutex<Option<u16>>>,
     pub pad: Arc<Mutex<Option<SharedCoolingPad>>>,
-    pub pending_cooling_pad_restore: Arc<AtomicBool>,
     pub needs_redetect: Arc<AtomicBool>,
     stop: Arc<StopSignal>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CoolingPadEnforceContext {
-    pub fn start(shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>) -> Self {
+    pub fn start(
+        shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>,
+        activity_gate: Arc<ActivityGate>,
+    ) -> Self {
         let stop = StopSignal::new();
         let settings = Arc::new(Mutex::new(CoolingPadEnforceShared::default()));
         let laptop_fan_rpm = Arc::new(Mutex::new(None));
         let pad = Arc::new(Mutex::new(None));
-        let pending_cooling_pad_restore = Arc::new(AtomicBool::new(false));
         let needs_redetect = Arc::new(AtomicBool::new(false));
 
         let handle = spawn_cooling_pad_enforcer(
@@ -88,18 +90,11 @@ impl CoolingPadEnforceContext {
             Arc::clone(&pad),
             Arc::clone(&needs_redetect),
             Arc::clone(&shared_thermal),
+            Arc::clone(&activity_gate),
             Arc::clone(&stop),
         );
 
-        Self {
-            settings,
-            laptop_fan_rpm,
-            pad,
-            pending_cooling_pad_restore,
-            needs_redetect,
-            stop,
-            handle: Some(handle),
-        }
+        Self { settings, laptop_fan_rpm, pad, needs_redetect, stop, handle: Some(handle) }
     }
 
     pub fn stop(&mut self) {
@@ -116,6 +111,7 @@ fn spawn_cooling_pad_enforcer(
     pad_slot: Arc<Mutex<Option<SharedCoolingPad>>>,
     needs_redetect: Arc<AtomicBool>,
     shared_thermal: Arc<Mutex<crate::system::thermal::ThermalSnapshot>>,
+    activity_gate: Arc<ActivityGate>,
     stop: Arc<StopSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -124,8 +120,11 @@ fn spawn_cooling_pad_enforcer(
             let mut last_tick = Instant::now();
 
             while !stop.is_stopped() {
-                if stop.wait(ENFORCE_INTERVAL) {
+                if stop.wait_active(&activity_gate, ENFORCE_INTERVAL) {
                     break;
+                }
+                if !activity_gate.is_active() {
+                    continue;
                 }
 
                 let pad = pad_slot.lock().ok().and_then(|guard| guard.clone());

@@ -323,6 +323,10 @@ impl AppConfig {
             config.version = CONFIG_VERSION;
             migrated = true;
         }
+        config.cooling_pad = crate::app::cooling_pad_controller::normalize_runtime(
+            CoolingPadRuntime::from(&config.cooling_pad),
+        )
+        .into();
         Ok((config, migrated))
     }
 }
@@ -506,6 +510,8 @@ mod tests {
         let (actual, migrated) = AppConfig::parse(&json).unwrap();
 
         assert!(!migrated);
+        let mut expected = expected;
+        expected.cooling_pad.lighting_mode = "Static".into();
         assert_eq!(actual, expected);
     }
 

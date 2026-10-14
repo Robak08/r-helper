@@ -1,8 +1,8 @@
-use crate::chroma::packet::{build_request, response_ok, xor_crc, REPORT_LEN};
+use crate::chroma::packet::{REPORT_LEN, build_request, response_ok, xor_crc};
 use crate::chroma::transport::send_feature_report;
 use crate::enumerate::RazerHidEntry;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 const CMD_CLASS_POWER: u8 = 0x07;
 const CMD_BATTERY: u8 = 0x80;

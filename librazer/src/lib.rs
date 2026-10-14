@@ -9,5 +9,5 @@ pub mod types;
 
 pub mod capabilities;
 pub mod descriptor;
-pub mod profile;
 mod packet;
+pub mod profile;

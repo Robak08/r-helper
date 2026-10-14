@@ -1,6 +1,7 @@
 use crate::chroma::effects::{
-    build_extended_breathing_single, build_extended_brightness, build_extended_get_brightness,
-    build_extended_none, build_extended_static, Rgb, TRANSACTION_ID_COOLING_PAD, VARSTORE, ZERO_LED,
+    Rgb, TRANSACTION_ID_COOLING_PAD, VARSTORE, ZERO_LED, build_extended_breathing_single,
+    build_extended_brightness, build_extended_get_brightness, build_extended_none,
+    build_extended_static,
 };
 use crate::chroma::send_feature_report;
 

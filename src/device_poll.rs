@@ -13,6 +13,7 @@ use librazer::{
 
 use librazer::cooling_pad::CoolingPadDevice;
 
+use crate::activity_gate::ActivityGate;
 use crate::device::CompleteDeviceState;
 use crate::laptop_fan_cap::{
     CapEnforcerState, LaptopFanCapShared, LaptopFanState, enforce_laptop_fan_cap_from_sample,
@@ -49,6 +50,7 @@ pub fn spawn_cooling_pad_poller(
     tx: SyncSender<CoolingPadPollSnapshot>,
     brightness_slider_active: Arc<AtomicBool>,
     poll_slow: Arc<AtomicBool>,
+    activity_gate: Arc<ActivityGate>,
     stop: Arc<StopSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -60,8 +62,11 @@ pub fn spawn_cooling_pad_poller(
                 } else {
                     FAST_POLL_INTERVAL
                 };
-                if stop.wait(interval) {
+                if stop.wait_active(&activity_gate, interval) {
                     break;
+                }
+                if !activity_gate.is_active() {
+                    continue;
                 }
 
                 let snapshot = {
@@ -101,6 +106,7 @@ pub fn spawn_device_poller(
     laptop_fan_rpm: Arc<Mutex<Option<u16>>>,
     laptop_fan_cap: Arc<Mutex<LaptopFanCapShared>>,
     shared_thermal: Arc<Mutex<ThermalSnapshot>>,
+    activity_gate: Arc<ActivityGate>,
     stop: Arc<StopSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -123,8 +129,11 @@ pub fn spawn_device_poller(
                 } else {
                     FAST_POLL_INTERVAL
                 };
-                if stop.wait(interval) {
+                if stop.wait_active(&activity_gate, interval) {
                     break;
+                }
+                if !activity_gate.is_active() {
+                    continue;
                 }
 
                 let include_full = last_slow.elapsed() >= SLOW_POLL_INTERVAL;

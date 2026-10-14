@@ -1,8 +1,8 @@
 use crate::chroma::probe_peripheral_battery;
 use crate::cooling_pad::COOLING_PAD_PID;
 use crate::headset::{
-    device_protocol, hid_debug, is_modern_headset_pid, ranked_entries_for_pid, DeviceProtocol,
-    HeadsetBatteryManager,
+    DeviceProtocol, HeadsetBatteryManager, device_protocol, hid_debug, is_modern_headset_pid,
+    ranked_entries_for_pid,
 };
 use crate::profile::lookup_profile;
 
@@ -128,10 +128,7 @@ pub fn enrich_peripheral_batteries(
     headset_manager.tick(entries);
 
     for summary in summaries.iter_mut() {
-        if matches!(
-            summary.kind,
-            RazerDeviceKind::BladeLaptop | RazerDeviceKind::CoolingPad
-        ) {
+        if matches!(summary.kind, RazerDeviceKind::BladeLaptop | RazerDeviceKind::CoolingPad) {
             continue;
         }
 
@@ -181,10 +178,7 @@ fn log_failed_battery_probe(entries: &[RazerHidEntry], pid: u16) {
         return;
     }
 
-    hid_debug(format!(
-        "Battery probe failed for PID 0x{pid:04x} ({})",
-        interfaces.join("; ")
-    ));
+    hid_debug(format!("Battery probe failed for PID 0x{pid:04x} ({})", interfaces.join("; ")));
 }
 
 fn best_name(entry: &RazerHidEntry) -> String {
@@ -197,7 +191,9 @@ fn best_name(entry: &RazerHidEntry) -> String {
 
 fn is_better_name(candidate: &Option<String>, current: &str) -> bool {
     match candidate {
-        Some(name) if !name.is_empty() && (current.is_empty() || current.starts_with("Razer device")) => {
+        Some(name)
+            if !name.is_empty() && (current.is_empty() || current.starts_with("Razer device")) =>
+        {
             true
         }
         _ => false,

@@ -2,7 +2,7 @@ use super::fan::{self, fan_off, set_rpm};
 use super::lighting::{self, PadLightingMode};
 
 use crate::chroma::Rgb;
-use crate::enumerate::{list_razer_hid_devices, RAZER_VID};
+use crate::enumerate::{RAZER_VID, list_razer_hid_devices};
 
 use anyhow::{Context, Result};
 use std::ffi::CString;
@@ -18,10 +18,8 @@ pub struct CoolingPadDevice {
 impl CoolingPadDevice {
     pub fn detect() -> Result<Self> {
         let api = hidapi::HidApi::new().context("Failed to create hid api")?;
-        let entries: Vec<_> = list_razer_hid_devices()?
-            .into_iter()
-            .filter(|e| e.pid == COOLING_PAD_PID)
-            .collect();
+        let entries: Vec<_> =
+            list_razer_hid_devices()?.into_iter().filter(|e| e.pid == COOLING_PAD_PID).collect();
 
         if entries.is_empty() {
             anyhow::bail!("Razer Laptop Cooling Pad not found");
@@ -102,7 +100,10 @@ impl CoolingPadDevice {
     }
 }
 
-fn pick_fan_path(api: &hidapi::HidApi, entries: &[crate::enumerate::RazerHidEntry]) -> Result<CString> {
+fn pick_fan_path(
+    api: &hidapi::HidApi,
+    entries: &[crate::enumerate::RazerHidEntry],
+) -> Result<CString> {
     let mut candidates: Vec<_> = entries.iter().collect();
     candidates.sort_by_key(|e| std::cmp::Reverse(e.interface_number));
 
@@ -122,10 +123,8 @@ fn pick_chroma_path(
     entries: &[crate::enumerate::RazerHidEntry],
     fan_path: &CString,
 ) -> Option<CString> {
-    let mut candidates: Vec<_> = entries
-        .iter()
-        .filter(|e| e.path.as_bytes() != fan_path.as_bytes())
-        .collect();
+    let mut candidates: Vec<_> =
+        entries.iter().filter(|e| e.path.as_bytes() != fan_path.as_bytes()).collect();
     candidates.sort_by_key(|e| std::cmp::Reverse(e.interface_number));
 
     for entry in candidates {

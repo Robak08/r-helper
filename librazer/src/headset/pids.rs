@@ -32,9 +32,9 @@ pub fn headset_profile(pid: u16) -> Option<HeadsetProfile> {
         | BLACKSHARK_V3_PRO_WIRED
         | KRAKEN_V4
         | KRAKEN_V4_PRO => Some(HeadsetProfile::WiredDirect),
-        BLACKSHARK_V2_PRO_DONGLE
-        | BLACKSHARK_V3_PRO_DONGLE
-        | BLACKSHARK_V3_X_HYPERSPEED => Some(HeadsetProfile::WirelessDongle),
+        BLACKSHARK_V2_PRO_DONGLE | BLACKSHARK_V3_PRO_DONGLE | BLACKSHARK_V3_X_HYPERSPEED => {
+            Some(HeadsetProfile::WirelessDongle)
+        }
         _ => None,
     }
 }
@@ -44,11 +44,7 @@ pub fn is_modern_headset_pid(pid: u16) -> bool {
 }
 
 pub fn device_protocol(pid: u16) -> DeviceProtocol {
-    if is_modern_headset_pid(pid) {
-        DeviceProtocol::HeadsetModern
-    } else {
-        DeviceProtocol::Chroma
-    }
+    if is_modern_headset_pid(pid) { DeviceProtocol::HeadsetModern } else { DeviceProtocol::Chroma }
 }
 
 #[cfg(test)]
@@ -57,19 +53,13 @@ mod tests {
 
     #[test]
     fn blackshark_v3_is_wired_direct() {
-        assert_eq!(
-            headset_profile(BLACKSHARK_V3_USB),
-            Some(HeadsetProfile::WiredDirect)
-        );
+        assert_eq!(headset_profile(BLACKSHARK_V3_USB), Some(HeadsetProfile::WiredDirect));
         assert_eq!(device_protocol(BLACKSHARK_V3_USB), DeviceProtocol::HeadsetModern);
     }
 
     #[test]
     fn v3_pro_dongle_is_wireless() {
-        assert_eq!(
-            headset_profile(BLACKSHARK_V3_PRO_DONGLE),
-            Some(HeadsetProfile::WirelessDongle)
-        );
+        assert_eq!(headset_profile(BLACKSHARK_V3_PRO_DONGLE), Some(HeadsetProfile::WirelessDongle));
     }
 
     #[test]
